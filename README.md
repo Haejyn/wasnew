@@ -2,7 +2,7 @@
 
 # wasnew
 
-AI 에이전트가 파일을 만질 때 쓰는 되돌리기. 에이전트는 계획하고, 사람은 승인하고, 무엇이든 되돌린다. 누가 · 왜 했는지 남고, 사용자 파일은 지우지 않는다.
+git이 챙기지 못하는 파일을 위한 되돌리기. AI 에이전트가 커밋하지 않은 파일이나 git 밖 폴더에서 옮기고 지운 것을 작업 단위로 되돌린다. 누가 왜 했는지 남기고, 사용자 파일은 지우지 않는다.
 
 ![tests](https://img.shields.io/badge/tests-78%20passed-16a34a)
 ![node](https://img.shields.io/badge/node-%E2%89%A520-339933)
@@ -14,15 +14,18 @@ AI 에이전트가 파일을 만질 때 쓰는 되돌리기. 에이전트는 계
 
 ## 왜
 
-- 에이전트 체크포인트는 에이전트가 **편집한** 파일만 되돌린다. 셸에서 한 `rm` · `mv`, git 밖 폴더(다운로드 · 바탕화면 · NAS)는 대상이 아니다
-- git 은 사람이 커밋하는 코드용이다. `reset --hard` · `clean` 처럼 지우는 길이 있고, 이동은 기록하지 않고 추론한다
-- 백업 도구는 무엇이 일어났는지 모른다. 이동 기록도, 작업 단위도, 누가 했는지도 없다
+git은 커밋해 둔 파일이라면 `rm`이나 `mv`도 되돌린다. 비는 곳은 그 바깥이다.
 
-wasnew 는 그 사이에 선다 — **아무 폴더에서, 에이전트의 작업 단위로, 누가 · 왜를 남기며** 되돌린다.
+- **커밋하지 않은 파일.** 추적하지 않거나 무시한 파일, 커밋 전 수정은 git에 사본이 없다
+- **git 저장소가 아닌 폴더.** 다운로드, 바탕화면, 사진, NAS
+- **에이전트가 한 것만 되돌리기.** git은 작업 트리 전체를 되돌려서, 그 사이 사람이 고친 것까지 같이 사라진다
+- **누가, 왜.** git은 이동을 기록하지 않고 삭제와 추가로 추론한다
+
+에이전트 체크포인트는 에이전트가 편집한 파일만 되돌리고, 백업 도구는 무슨 일이 있었는지 모른다. wasnew는 그 빈자리를 맡는다. **아무 폴더에서, 에이전트의 작업 단위로, 누가 왜 했는지 남기며** 되돌린다.
 
 | | git | wasnew |
 |---|---|---|
-| 대상 | 코드, 사람이 커밋 | 아무 폴더, 프로그램이 조작 |
+| 대상 | 커밋한 파일 | 아무 폴더의 아무 파일 |
 | 필요한 것 | git 바이너리 | Node 20+, 의존성 0개, `.wasnew/` 폴더 하나 |
 | 지우기 | `reset --hard` · `clean` | 휴지통으로 옮길 뿐. 진짜 삭제는 사람의 `empty-trash` 뿐 |
 | 이동 | 삭제 + 추가로 추론 | 저널에 기록, 작업(batch) 단위로 되돌림 |
@@ -48,22 +51,22 @@ Claude Desktop 은 `claude_desktop_config.json` 에:
 | `wasnew_snapshot` | 지금 내용을 저장. 여러 파일을 바꾸기 전에 |
 | `wasnew_move` | 이동 · 이름 바꾸기. 목적지가 있으면 `DEST_EXISTS` 로 거부. 작업마다 batch 하나, `reason` 으로 사유 |
 | `wasnew_trash` | 지우기 대신 휴지통으로. `wasnew_undo` 로 되돌림 |
-| `wasnew_plan` | 이동 · 휴지통 목록을 아무것도 건드리지 않고 검사 — 조작마다 문제, 승인 필요 여부 |
+| `wasnew_plan` | 이동 · 휴지통 목록을 아무것도 건드리지 않고 검사. 조작마다 문제와 승인 필요 여부를 알려 줌 |
 | `wasnew_apply` | 계획을 정확히 그대로, 한 번만, 한 batch 로. 승인 전이면 `NEEDS_APPROVAL`, 그 사이 폴더가 바뀌었으면 `PLAN_INVALID` |
 | `wasnew_undo` | 묶음 전체, 묶음의 마지막 N개, 또는 마지막 N개를 되돌림. 못 되돌린 것은 이유와 함께 |
 | `wasnew_restore` | 스냅샷 내용으로 복원. 덮어쓸 파일은 먼저 `guard` 스냅샷으로 저장 |
 | `wasnew_diff` | 추가 · 변경 · 사라짐 · 이동(내용 해시로 감지). 사용자에게 한 일을 설명할 때 |
-| `wasnew_history` | 한 파일의 이동 · 휴지통 · 되돌림 · 복원 — 언제, 누가, 왜 |
+| `wasnew_history` | 한 파일의 이동 · 휴지통 · 되돌림 · 복원을 언제, 누가, 왜 했는지 |
 | `wasnew_read` | 파일을 그 시점의 내용으로 읽기 |
 | `wasnew_log` · `wasnew_pending` | 스냅샷 목록 · 아직 되돌릴 수 있는 것 |
 
 - 접속한 클라이언트 이름(`clientInfo`)이 에이전트로 기록되고, 모델은 `model` · `reason` 을 덧붙인다
-- **승인 도구는 MCP 에 없다** — 에이전트는 스스로 승인할 수 없다
+- **승인 도구는 MCP 에 없다.** 에이전트는 스스로 승인할 수 없다
 - 기본은 `--root` 안의 파일만 옮긴다. 밖에서 가져오는 일은 `--allow-outside-sources` 로 켠다
-- 도구 실패는 프로토콜 에러가 아니라 `isError` 결과로 돌아온다 — 에이전트가 코드를 읽고 고쳐서 다시 시도한다
+- 도구 실패는 프로토콜 에러가 아니라 `isError` 결과로 돌아온다. 에이전트가 코드를 읽고 고쳐서 다시 시도한다
 - 셸의 `rm` · `mv` 까지 막으려면 [Claude Code 훅 예제](examples/claude-code/)
 
-## 정책 — `.wasnew/policy.json`
+## 정책 (`.wasnew/policy.json`)
 
 ```json
 { "protect": ["Taxes/", "*.key"], "requireApprovalOver": 20, "maxOpsPerBatch": 1000, "allowTrash": true }
@@ -76,7 +79,7 @@ Claude Desktop 은 `claude_desktop_config.json` 에:
 | `maxOpsPerBatch` | 한 batch 의 최대 조작 수 (폭발 반경) |
 | `allowTrash` | `false` 면 휴지통도 끔 |
 
-잘못된 정책은 닫힌 쪽으로 실패한다 — 고칠 때까지 모든 조작이 `POLICY_INVALID`.
+정책 파일이 잘못되면 고칠 때까지 모든 조작이 `POLICY_INVALID`로 막힌다.
 
 ## 계획 → 승인 → 적용
 
@@ -86,17 +89,17 @@ person wasnew show baebff75
 person wasnew approve baebff75
 agent  wasnew_apply  → done 3, batch plan-baebff75
 person wasnew history "copy of notes.md"
-       trash  copy of notes.md -> trash/…  by claude-code 2.1.0 — sort Downloads
+       trash  copy of notes.md -> trash/…  by claude-code 2.1.0 (sort Downloads)
 person wasnew undo --batch plan-baebff75
 ```
 
-계획은 앞선 조작의 결과를 따라가며 검사한다 — 이미 옮겨진 원본, 계획 안에서 겹치는 목적지, 보호 경로, 한도를 조작 번호와 함께 알려 준다.
+계획은 앞선 조작의 결과를 따라가며 검사한다. 이미 옮겨진 원본, 계획 안에서 겹치는 목적지, 보호 경로, 한도를 조작 번호와 함께 알려 준다.
 
 ## 실측
 
 | 항목 | 결과 |
 |---|---|
-| 스냅샷 — 파일 2,626개(1 GiB 하나 포함) | 5.4 s, 최대 RSS 162 MB (스트리밍 해시, 파일을 통째로 올리지 않음) |
+| 스냅샷 (파일 2,626개, 1 GiB 하나 포함) | 5.4 s, 최대 RSS 162 MB (스트리밍 해시, 파일을 통째로 올리지 않음) |
 | 같은 폴더 다시 스냅샷 | 0.24 s, 다시 읽은 파일 0개 (크기 · 수정 시각 캐시) |
 | 이동 2,625건 (저널 잠금 · 크래시 표식 포함) | 2.9 s |
 | 그 묶음 되돌리기 | 2.9 s, 2,625건 전부, 빈 폴더 정리 |
@@ -171,9 +174,9 @@ await vault.history("Docs/a.pdf");
 ## 개발
 
 ```bash
-pnpm test        # 78개 — 스냅샷 · stat 캐시 · watch · 복원 guard · 볼륨 간 이동 · 잠금 · 휴지통 · 출처 · 정책 · 계획/승인 · 복구 · MCP 왕복 · 훅
+pnpm test        # 78개: 스냅샷 · stat 캐시 · watch · 복원 guard · 볼륨 간 이동 · 잠금 · 휴지통 · 출처 · 정책 · 계획/승인 · 복구 · MCP 왕복 · 훅
 pnpm typecheck
-pnpm build       # dist/ — CLI 와 MCP 서버
+pnpm build       # dist/ 에 CLI 와 MCP 서버
 pnpm bench
 ```
 
@@ -185,9 +188,9 @@ wasnew 는 ISNEW 앱의 파일 정리 엔진이 쓰는 되돌리기 계층으로
 - 테스트는 CI 에서 ubuntu · windows · macOS × Node 20 · 22 로 돕니다. 실측 숫자는 Linux 한 대에서만 쟀습니다
 - 정책 파일은 wasnew 도구로는 못 고치지만, 에이전트가 다른 편집 도구로 고치는 것까지 막지는 않습니다
 - `maxOpsPerBatch` 는 batch 를 단 조작만 셉니다
-- 볼륨을 넘어 폴더를 통째로 옮기지 못합니다(`CROSS_DEVICE_DIR`) — 파일 단위로
+- 볼륨을 넘어 폴더를 통째로 옮기지 못합니다(`CROSS_DEVICE_DIR`). 파일 단위로 옮겨 주세요
 - 지금과 비교하는 `diff` 는 모든 파일을 해시합니다
-- 내용을 바꾸면서 크기와 수정 시각까지 되돌려 놓는 프로그램은 캐시를 속일 수 있습니다 — 그럴 땐 `snapshot --rehash`
+- 내용을 바꾸면서 크기와 수정 시각까지 되돌려 놓는 프로그램은 캐시를 속일 수 있습니다. 그럴 땐 `snapshot --rehash`를 쓰세요
 - `watch` 는 Node 의 재귀 감시(`fs.watch`)를 씁니다. 네트워크 드라이브에서는 변경 알림이 오지 않을 수 있습니다
 
 코드는 MIT. 이름과 로고는 라이선스에 포함되지 않아요([NOTICE](NOTICE)).

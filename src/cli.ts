@@ -3,7 +3,7 @@ import { parseArgs } from "node:util";
 import { openVault, isWasnewError, type Actor, type Plan } from "./index.js";
 import { serveMcp, formatDiff, VERSION } from "./mcp.js";
 
-const HELP = `wasnew ${VERSION} — undo for programs that touch your files
+const HELP = `wasnew ${VERSION}: undo for what AI agents move and delete
 
 usage: wasnew <command> [options]
 
@@ -78,7 +78,7 @@ async function main(argv: string[]): Promise<number> {
       process.once("SIGINT", () => ac.abort());
       process.once("SIGTERM", () => ac.abort());
       const first = await vault.snapshot({ label: values.message ?? "watch", skipIfUnchanged: true });
-      if (!values.json) console.error(`watching ${vault.root} — ${first.unchanged ? "up to date with" : "saved"} ${first.id}; Ctrl+C to stop`);
+      if (!values.json) console.error(`watching ${vault.root}, ${first.unchanged ? "up to date with" : "saved"} ${first.id}; Ctrl+C to stop`);
       await vault.watch({
         signal: ac.signal,
         debounceMs: num(values.debounce),
@@ -122,7 +122,7 @@ async function main(argv: string[]): Promise<number> {
     }
     case "plans": {
       const list = await vault.plans();
-      out(list, list.map((p) => `${p.id}  ${p.created}  ${String(p.ops.length).padStart(5)} ops  ${planState(p)}${p.by?.reason ? `  — ${p.by.reason}` : ""}`).join("\n") || "no plans");
+      out(list, list.map((p) => `${p.id}  ${p.created}  ${String(p.ops.length).padStart(5)} ops  ${planState(p)}${p.by?.reason ? `  (${p.by.reason})` : ""}`).join("\n") || "no plans");
       return 0;
     }
     case "show": {
@@ -134,7 +134,7 @@ async function main(argv: string[]): Promise<number> {
     }
     case "approve": {
       const p = await vault.approve(need(rest[0], "approve needs a plan id"), values.by ?? process.env.USER ?? process.env.USERNAME);
-      out(p, `approved ${p.id} (${p.ops.length} operations)${p.issues.length ? ` — it has ${p.issues.length} issues and will not apply` : ""}`);
+      out(p, `approved ${p.id} (${p.ops.length} operations)${p.issues.length ? `, but it has ${p.issues.length} issues and will not apply` : ""}`);
       return 0;
     }
     case "apply": {
@@ -183,7 +183,7 @@ function planState(p: Plan): string {
 }
 
 function describe(by: Actor): string {
-  return [by.agent, by.model].filter(Boolean).join(" / ") + (by.reason ? ` — ${by.reason}` : "");
+  return [by.agent, by.model].filter(Boolean).join(" / ") + (by.reason ? ` (${by.reason})` : "");
 }
 
 main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (e) => {

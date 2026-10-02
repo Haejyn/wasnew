@@ -12,11 +12,11 @@ claude mcp add --transport stdio wasnew -- node /path/to/wasnew/bin/wasnew.js mc
 
 | 훅 | 하는 일 |
 |---|---|
-| `UserPromptSubmit` | 요청을 보낼 때마다 `$WASNEW_ROOT` 폴더를 스냅샷(`--if-changed` — 바뀐 게 없으면 건너뜀). 안 바뀐 파일은 다시 읽지 않아 빠름 |
+| `UserPromptSubmit` | 요청을 보낼 때마다 `$WASNEW_ROOT` 폴더를 스냅샷(`--if-changed`면 바뀐 게 없을 때 건너뜀). 안 바뀐 파일은 다시 읽지 않아 빠름 |
 | `PreToolUse` · `Bash` | [`guard.mjs`](guard.mjs) 가 `rm` · `mv` · `del` · `Remove-Item` · `git clean` · `git reset --hard` · `find -delete` 를 막고, 대신 `wasnew_trash` · `wasnew_move` 를 쓰라고 에이전트에게 돌려줌 |
 
 [`settings.json`](settings.json) 의 경로를 바꿔 `~/.claude/settings.json` 이나 프로젝트의 `.claude/settings.json` 에 합치세요. `WASNEW_ROOT` 는 지킬 폴더입니다.
-Windows 에서는 훅 명령이 PowerShell 로 돌아 `$WASNEW_ROOT` 가 펼쳐지지 않습니다 — 폴더 경로를 직접 적으세요.
+Windows 에서는 훅 명령이 PowerShell 로 돌아 `$WASNEW_ROOT` 가 펼쳐지지 않습니다. 폴더 경로를 직접 적으세요.
 
 ## 3. 큰 작업은 승인 받기
 
@@ -34,9 +34,9 @@ wasnew show <id>
 wasnew approve <id>
 ```
 
-그다음 에이전트가 `wasnew_apply` 로 실행합니다. 승인 도구는 MCP 에 없습니다 — 에이전트가 스스로 승인할 수 없습니다.
+그다음 에이전트가 `wasnew_apply` 로 실행합니다. 승인 도구는 MCP 에 없어서 에이전트가 스스로 승인할 수 없습니다.
 
 ## 제한
 
-- `guard.mjs` 는 명령 문자열을 패턴으로 봅니다. 스크립트 파일 안에서 지우거나 다른 언어로 지우는 것은 못 막습니다 — 그래서 스냅샷 훅을 같이 쓰고, 더 촘촘히 지키려면 `wasnew watch --root <폴더>` 를 따로 띄워 둡니다
+- `guard.mjs` 는 명령 문자열을 패턴으로 봅니다. 스크립트 파일 안에서 지우거나 다른 언어로 지우는 것은 못 막습니다. 그래서 스냅샷 훅을 같이 쓰고, 더 촘촘히 지키려면 `wasnew watch --root <폴더>` 를 따로 띄워 둡니다
 - 정책 파일은 wasnew 도구로는 고칠 수 없지만, 에이전트가 다른 편집 도구로 고치는 것까지 막지는 않습니다

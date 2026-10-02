@@ -1,7 +1,7 @@
 {
   "name": "wasnew",
   "version": "0.3.0",
-  "description": "Undo for programs that touch your files — local snapshots, a move journal and an MCP server for AI agents. Never deletes.",
+  "description": "Undo for files git doesn't cover. Rolls back what AI agents move and delete, per task, with snapshots, a move journal and an MCP server. Never deletes.",
   "private": true,
   "type": "module",
   "main": "./src/index.ts",

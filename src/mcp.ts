@@ -19,7 +19,7 @@ const INSTRUCTIONS = `wasnew keeps an undoable history of a folder. Use these to
 - Move or rename with wasnew_move; to delete, use wasnew_trash (it can be undone). Pass one batch id per task so the user can undo the whole task with wasnew_undo, and say why in "reason".
 - For larger changes, propose them with wasnew_plan and show the user the plan. If it needs approval, the user approves it themselves (\`wasnew approve <id>\`); then call wasnew_apply.
 - wasnew_restore brings files back to a snapshot and first saves what it overwrites, so it can be undone too.
-- Errors carry a code (DEST_EXISTS, POLICY_PROTECTED, NEEDS_APPROVAL, ...) — read it, fix the input or ask the user, then retry.`;
+- Errors carry a code (DEST_EXISTS, POLICY_PROTECTED, NEEDS_APPROVAL, ...). Read it, fix the input or ask the user, then retry.`;
 
 interface Tool {
   name: string;
@@ -36,7 +36,7 @@ const int = (description: string, minimum = 1) => ({ type: "integer", minimum, d
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
 const WRITES = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
 
-const reason = str("Why — one short sentence the user will see in the history");
+const reason = str("Why, in one short sentence the user will see in the history");
 
 /** The connected client is the agent; the model may name itself and give a reason per call */
 function actor(ctx: Context, a: { reason?: string; model?: string }): Actor | undefined {
@@ -216,7 +216,7 @@ const TOOLS: Tool[] = [
   {
     name: "wasnew_history",
     title: "History of a file",
-    description: "Everything recorded about a path and the names it had: moves, trashes, undos, restores — when, by whom and why.",
+    description: "Everything recorded about a path and the names it had: moves, trashes, undos and restores, with when, by whom and why.",
     inputSchema: { type: "object", properties: { path: str("Path relative to the folder, current or former") }, required: ["path"], additionalProperties: false },
     annotations: READ_ONLY,
     async run(v, a) { return { result: { events: await v.history(a.path) } }; },
