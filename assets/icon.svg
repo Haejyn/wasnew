@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>wasnew — the moon when it was new</title>
+  <defs><filter id="glow" filterUnits="userSpaceOnUse" x="-12" y="-12" width="48" height="48"><feGaussianBlur stdDeviation=".8"/></filter></defs>
+  <rect width="512" height="512" fill="#000"/>
+  <circle cx="169" cy="84" r="1" fill="#fff" opacity="0.29"/>
+  <circle cx="39" cy="260" r="1" fill="#fff" opacity="0.30"/>
+  <circle cx="281" cy="39" r="2" fill="#fff" opacity="0.32"/>
+  <circle cx="476" cy="294" r="1.6" fill="#fff" opacity="0.28"/>
+  <circle cx="76" cy="216" r="2" fill="#fff" opacity="0.31"/>
+  <circle cx="162" cy="412" r="1" fill="#fff" opacity="0.31"/>
+  <circle cx="291" cy="102" r="1" fill="#fff" opacity="0.55"/>
+  <circle cx="41" cy="39" r="1" fill="#fff" opacity="0.52"/>
+  <circle cx="239" cy="464" r="1.3" fill="#fff" opacity="0.41"/>
+  <circle cx="401" cy="354" r="1" fill="#fff" opacity="0.30"/>
+  <circle cx="310" cy="46" r="2" fill="#fff" opacity="0.48"/>
+  <circle cx="383" cy="85" r="1.6" fill="#fff" opacity="0.48"/>
+  <circle cx="483" cy="48" r="2" fill="#fff" opacity="0.57"/>
+  <circle cx="441" cy="164" r="1.3" fill="#fff" opacity="0.58"/>
+  <circle cx="423" cy="475" r="1.6" fill="#fff" opacity="0.63"/>
+  <circle cx="42" cy="370" r="1.3" fill="#fff" opacity="0.61"/>
+  <circle cx="499" cy="414" r="1.3" fill="#fff" opacity="0.64"/>
+  <circle cx="446" cy="181" r="1.6" fill="#fff" opacity="0.45"/>
+  <circle cx="461" cy="254" r="1" fill="#fff" opacity="0.50"/>
+  <circle cx="280" cy="445" r="1.6" fill="#fff" opacity="0.73"/>
+  <circle cx="187" cy="445" r="1" fill="#fff" opacity="0.33"/>
+  <circle cx="97" cy="124" r="1" fill="#fff" opacity="0.26"/>
+  <path transform="translate(80 88) scale(1.833)" d="M0-12Q2.2-2.2 12 0Q2.2 2.2 0 12Q-2.2 2.2-12 0Q-2.2-2.2 0-12Z" fill="#fff" opacity=".9"/>
+  <path transform="translate(420 58) scale(1.333)" d="M0-12Q2.2-2.2 12 0Q2.2 2.2 0 12Q-2.2 2.2-12 0Q-2.2-2.2 0-12Z" fill="#fff" opacity=".9"/>
+  <path transform="translate(46 260) scale(1.083)" d="M0-12Q2.2-2.2 12 0Q2.2 2.2 0 12Q-2.2 2.2-12 0Q-2.2-2.2 0-12Z" fill="#fff" opacity=".9"/>
+  <path transform="translate(462 330) scale(1.333)" d="M0-12Q2.2-2.2 12 0Q2.2 2.2 0 12Q-2.2 2.2-12 0Q-2.2-2.2 0-12Z" fill="#fff" opacity=".9"/>
+  <path transform="translate(385 458) scale(1.000)" d="M0-12Q2.2-2.2 12 0Q2.2 2.2 0 12Q-2.2 2.2-12 0Q-2.2-2.2 0-12Z" fill="#fff" opacity=".9"/>
+  <path transform="translate(160 45) scale(0.917)" d="M0-12Q2.2-2.2 12 0Q2.2 2.2 0 12Q-2.2 2.2-12 0Q-2.2-2.2 0-12Z" fill="#fff" opacity=".9"/>
+  <path transform="translate(100 410) scale(0.833)" d="M0-12Q2.2-2.2 12 0Q2.2 2.2 0 12Q-2.2 2.2-12 0Q-2.2-2.2 0-12Z" fill="#fff" opacity=".9"/>
+  <path transform="translate(470 170) scale(0.750)" d="M0-12Q2.2-2.2 12 0Q2.2 2.2 0 12Q-2.2 2.2-12 0Q-2.2-2.2 0-12Z" fill="#fff" opacity=".9"/>
+  <g transform="translate(112 112) scale(12)"><g filter="url(#glow)" opacity=".5"><circle cx="12" cy="12" r="9" fill="#15151b"/><circle cx="12" cy="12" r="8.6" fill="none" stroke="#FFF4C8" stroke-opacity="0.38" stroke-width="0.7"/><path d="M19.27 6.69A9 9 0 1 1 3.35 9.50A8.75 8.75 0 1 0 19.27 6.69Z" fill="#FFF4C8"/></g><circle cx="12" cy="12" r="9" fill="#15151b"/><circle cx="12" cy="12" r="8.6" fill="none" stroke="#FFF4C8" stroke-opacity="0.38" stroke-width="0.7"/><path d="M19.27 6.69A9 9 0 1 1 3.35 9.50A8.75 8.75 0 1 0 19.27 6.69Z" fill="#FFF4C8"/></g>
+</svg>

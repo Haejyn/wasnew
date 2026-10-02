@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node /path/to/wasnew/bin/wasnew.js snapshot --if-changed --root \"$WASNEW_ROOT\" -m \"before claude prompt\"" }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "node /path/to/wasnew/examples/claude-code/guard.mjs" }
+        ]
+      }
+    ]
+  }
+}
