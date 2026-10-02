@@ -1,7 +1,7 @@
 {
   "name": "wasnew",
   "version": "0.3.0",
-  "description": "Undo for files git doesn't cover. Rolls back what AI agents move and delete, per task, with snapshots, a move journal and an MCP server. Never deletes.",
+  "description": "Undo what AI agents move and delete, per task. Works outside git too.",
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
