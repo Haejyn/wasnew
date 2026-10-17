@@ -4,6 +4,10 @@
 
 wasnew is an undo layer for AI agents' file operations: it journals every move, rename and delete an agent makes in any folder, and undoes them per task, with or without git.
 
+![Terminal replay. Claude Code sorts a Downloads folder of 199 files with wasnew_plan and wasnew_apply. In a new session it tries to read invoice_oct.pdf at its old path, a hook blocks the read and gives the new path. Asked to run rm -rf Screenshots, another hook blocks the command and the agent uses wasnew_trash. Then wasnew undo puts all 199 files back.](assets/demo.gif)
+
+A real Claude Code session, run headless and replayed from its log ([scripts/demo](scripts/demo/)). Also as [MP4](assets/demo.mp4).
+
 [English](README.md) | [한국어](README.ko.md)
 
 ![tests](https://img.shields.io/badge/tests-114%20passed-16a34a)

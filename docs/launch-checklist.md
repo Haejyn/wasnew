@@ -9,7 +9,7 @@ Things that happen outside the repo. Check them off in order.
 - [x] Website: `https://github.com/Haejyn/wasnew#readme` (or the npm page after publishing)
 - [x] Topics (20, GitHub's limit):
   `ai-agent` `undo` `mcp` `mcp-server` `model-context-protocol` `claude-code` `claude` `rollback` `checkpoint` `trash` `safe-delete` `file-operations` `journal` `snapshot` `agent-safety` `ai-safety` `llm` `cli` `nodejs` `typescript`
-- [ ] Social preview image (Settings → General): icon on a plain background with the one-line definition
+- [ ] Social preview image: upload `assets/social-preview.png` in Settings → General (made by `scripts/demo/social.mjs`)
 - [x] Merge `docs/launch` into `main` so the llms.txt and README links (which point at `main`) resolve
 - [ ] Check that CITATION.cff shows the "Cite this repository" button
 
@@ -25,14 +25,10 @@ Things that happen outside the repo. Check them off in order.
 - [ ] Update README and README.ko.md quick start: `claude mcp add --transport stdio wasnew -- npx -y wasnew mcp --root ~/Downloads`
 - [ ] Tag the release (`git tag v0.3.0 && git push --tags`) and write GitHub release notes
 
-## Demo GIF (about 30 seconds)
+## Demo GIF
 
-- [ ] Scene 1: a Downloads folder with ~200 mixed files. Ask Claude Code "sort my downloads, trash the .tmp junk"
-- [ ] Scene 2: the agent calls `wasnew_snapshot`, `wasnew_move` and `wasnew_trash` (no bash). Show the summary lines, e.g. `151 × *.jpg  ./ → Pictures/2026/`
-- [ ] Scene 3: the agent tries `rm` once and the guard hook blocks it with "Use wasnew_trash (undoable) instead"
-- [ ] Scene 4: the agent then tries to `Read` a file at its old path; the moved-file hook stops it and gives the new path
-- [ ] Scene 5: in a terminal, `wasnew undo --batch <batch>` prints `undone 226`, and the folder is back as it was
-- [ ] Record at a readable font size, crop to the terminal, keep it under 5 MB, save as `assets/demo.gif`, add it under the definition line in both READMEs
+- [x] `assets/demo.gif` (39 s, 2.6 MB), `assets/demo.mp4` and `assets/demo-poster.png`, under the definition line in both READMEs
+  Made from a real headless Claude Code session: the agent sorts a 199-file Downloads folder with `wasnew_plan` and `wasnew_apply`, the moved-file hook redirects a `Read` of `invoice_oct.pdf` at its old path, the guard hook blocks `rm -rf Screenshots` and the agent uses `wasnew_trash`, then `wasnew undo` brings back all 199 files. Steps to record it again are in `scripts/demo/README.md`
 
 ## Where to post
 

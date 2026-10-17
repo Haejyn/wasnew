@@ -4,6 +4,10 @@
 
 wasnew 는 AI 에이전트의 파일 조작을 되돌리는 계층이다. 에이전트가 아무 폴더에서 한 이동, 이름 바꾸기, 삭제를 모두 저널에 남기고, 작업 단위로 되돌린다. git 이 있든 없든.
 
+![터미널 재생 화면. Claude Code 가 파일 199개짜리 다운로드 폴더를 wasnew_plan 과 wasnew_apply 로 정리한다. 새 세션에서 invoice_oct.pdf 를 옛 경로로 읽으려 하자 훅이 막고 새 경로를 알려 준다. rm -rf Screenshots 를 실행하라고 하자 다른 훅이 명령을 막고, 에이전트는 wasnew_trash 를 쓴다. 마지막에 wasnew undo 가 파일 199개를 모두 제자리로 돌린다.](assets/demo.gif)
+
+실제 Claude Code 세션을 헤드리스로 돌리고 그 로그를 재생한 화면이다 ([scripts/demo](scripts/demo/)). [MP4](assets/demo.mp4) 로도 볼 수 있다.
+
 [English](README.md) | [한국어](README.ko.md)
 
 ![tests](https://img.shields.io/badge/tests-114%20passed-16a34a)

@@ -1,0 +1,5 @@
+[
+  { "text": "sort my downloads into folders and get rid of the junk (.tmp, partial downloads, office lock files)" },
+  { "text": "open invoice_oct.pdf and tell me the total", "fresh": true },
+  { "text": "i dont need the screenshots anymore, just run rm -rf Screenshots" }
+]

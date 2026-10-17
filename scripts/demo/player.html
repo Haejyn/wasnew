@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>wasnew demo player</title>
+<!-- render.mjs loads this page, calls load(items) with the timeline it built from the take,
+     then seek(ms) for every frame. Open it in a browser and call play() to watch it live. -->
+<style>
+  :root {
+    --bg: #0f1115; --bar: #171a21; --fg: #d7dae0; --dim: #7a808c; --prompt: #7fd18b;
+    --tool: #6cb6ff; --arg: #c9ccd3; --block: #f0a35e; --agent: #eef0f4; --rule: #262a33;
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); }
+  body { font: 16px/1.45 "Cascadia Mono", "JetBrains Mono", Consolas, "DejaVu Sans Mono", monospace; color: var(--fg); }
+  .win { position: absolute; inset: 0; display: flex; flex-direction: column; }
+  .bar { height: 34px; flex: none; background: var(--bar); border-bottom: 1px solid var(--rule); display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 13px; }
+  .term { flex: 1; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; padding: 14px 28px 30px; }
+  .line { flex: none; white-space: pre-wrap; word-break: break-word; min-height: 1.45em; }
+  .caption { position: absolute; right: 16px; bottom: 8px; font-size: 12px; color: var(--dim); }
+  .p { color: var(--prompt); } .d { color: var(--dim); } .t { color: var(--tool); font-weight: 600; }
+  .a { color: var(--arg); } .b { color: var(--block); } .g { color: var(--agent); } .ok { color: var(--prompt); }
+  .cur { display: inline-block; width: 0.6em; height: 1.1em; vertical-align: -0.2em; background: var(--fg); }
+</style>
+</head>
+<body>
+<div class="win">
+  <div class="bar">~/Downloads</div>
+  <div class="term" id="term"></div>
+</div>
+<div class="caption">real Claude Code session, recorded headless, replayed</div>
+<script>
+  let items = [];
+  const term = document.getElementById("term");
+  const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  // an item: { at: ms, segs: [[class, text], ...], type: ms per char (optional), pre: chars shown at once, hang: indent of wrapped rows in ch, cursor: bool }
+  window.load = (list) => { items = list; };
+  window.seek = (t) => {
+    let html = "";
+    const shown = items.filter((it) => it.at <= t);
+    shown.forEach((it, n) => {
+      let left = it.type ? (it.pre ?? 0) + Math.floor((t - it.at) / it.type) : Infinity;
+      const typing = it.type && left < it.segs.reduce((s, [, x]) => s + x.length, 0);
+      let body = "";
+      for (const [cls, text] of it.segs) {
+        const part = text.slice(0, Math.max(0, left));
+        left -= text.length;
+        if (part) body += `<span class="${cls}">${esc(part)}</span>`;
+      }
+      const last = n === shown.length - 1;
+      if ((typing || it.cursor) && last) body += '<span class="cur"></span>';
+      const hang = it.hang ? ` style="padding-left:${it.hang}ch;text-indent:-${it.hang}ch"` : "";
+      html += `<div class="line"${hang}>${body}</div>`;
+    });
+    term.innerHTML = html;
+    return html;   // render.mjs skips the screenshot when nothing changed
+  };
+  window.play = () => {
+    const t0 = performance.now();
+    const end = Math.max(...items.map((i) => i.at)) + 3000;
+    const tick = () => { const t = performance.now() - t0; seek(t); if (t < end) requestAnimationFrame(tick); };
+    tick();
+  };
+</script>
+</body>
+</html>
