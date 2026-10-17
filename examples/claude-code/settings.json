@@ -13,6 +13,12 @@
         "hooks": [
           { "type": "command", "command": "node /path/to/wasnew/examples/claude-code/guard.mjs" }
         ]
+      },
+      {
+        "matcher": "Read|Edit|MultiEdit|Write",
+        "hooks": [
+          { "type": "command", "command": "node /path/to/wasnew/examples/claude-code/moved.mjs" }
+        ]
       }
     ]
   }

@@ -7,19 +7,26 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
-import { openVault, type Actor, type Diff, type ManyResult, type PlanOp, type Vault } from "./index.js";
+import { openVault, type Actor, type Diff, type ManyResult, type PlanOp, type UndoResult, type Vault, type WhereResult } from "./index.js";
 import { WasnewError, isWasnewError } from "./errors.js";
+import { summarizeOps, type SummaryOp } from "./summary.js";
 
 export const VERSION = "0.3.0";
 const PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const MAX_READ_BYTES = 200_000;
+/** A result list longer than this is cut to its first KEEP items unless the call asks for `full` */
+const CUT_OVER = 50;
+const KEEP = 20;
+/** Failure codes that mean "no such path": the journal may know where it went */
+const MISSING = new Set(["ENOENT", "NOT_FOUND", "NOT_IN_SNAPSHOT"]);
 
 const INSTRUCTIONS = `wasnew keeps an undoable history of a folder. Use these tools instead of mv, rm or overwriting files directly:
 - Call wasnew_snapshot before changing many files.
 - Move or rename with wasnew_move; to delete, use wasnew_trash (it can be undone). Pass one batch id per task so the user can undo the whole task with wasnew_undo, and say why in "reason".
 - For larger changes, propose them with wasnew_plan and show the user the plan. If it needs approval, the user approves it themselves (\`wasnew approve <id>\`); then call wasnew_apply.
 - wasnew_restore brings files back to a snapshot and first saves what it overwrites, so it can be undone too.
-- Errors carry a code (DEST_EXISTS, POLICY_PROTECTED, NEEDS_APPROVAL, ...). Read it, fix the input or ask the user, then retry.`;
+- Errors carry a code (DEST_EXISTS, POLICY_PROTECTED, NEEDS_APPROVAL, ...). Read it, fix the input or ask the user, then retry.
+- Read \`summary\` first: it groups similar changes into a few lines. Lists over ${CUT_OVER} items are cut to ${KEEP} unless you pass full: true.`;
 
 interface Tool {
   name: string;
@@ -37,6 +44,7 @@ const READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: f
 const WRITES = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
 
 const reason = str("Why, in one short sentence the user will see in the history");
+const full = { type: "boolean", description: `Return every item; by default a list over ${CUT_OVER} items is cut to the first ${KEEP} and \`summary\` describes all of them` };
 
 /** The connected client is the agent; the model may name itself and give a reason per call */
 function actor(ctx: Context, a: { reason?: string; model?: string }): Actor | undefined {
@@ -59,7 +67,7 @@ async function gate(v: Vault, n: number): Promise<void> {
 async function keepGoing<T>(
   list: T[],
   many: (items: T[]) => Promise<ManyResult>,
-  onFail: (item: T, code: string, message: string) => void,
+  onFail: (item: T, code: string, message: string, index: number) => void,
   refuse: (item: T) => WasnewError | undefined = () => undefined,
 ): Promise<number> {
   let done = 0;
@@ -67,7 +75,7 @@ async function keepGoing<T>(
   while (i < list.length) {
     const refused = refuse(list[i]);
     if (refused) {
-      onFail(list[i], refused.code, refused.message);
+      onFail(list[i], refused.code, refused.message, i);
       i++;
       continue;
     }
@@ -75,7 +83,7 @@ async function keepGoing<T>(
     while (end < list.length && !refuse(list[end])) end++;
     const r = await many(list.slice(i, end));
     done += r.done;
-    if (r.failed) onFail(list[i + r.failed.index], r.failed.code, r.failed.message);
+    if (r.failed) onFail(list[i + r.failed.index], r.failed.code, r.failed.message, i + r.failed.index);
     i += r.failed ? r.failed.index + 1 : end - i;
   }
   return done;
@@ -83,6 +91,77 @@ async function keepGoing<T>(
 
 function newBatchId(): string {
   return "mcp-" + new Date().toISOString().replaceAll(/[-:.]/g, "").replace("T", "-").replace("Z", "") + "-" + randomBytes(2).toString("hex");
+}
+
+const cutList = <T>(list: T[], all: boolean): T[] => (!all && list.length > CUT_OVER ? list.slice(0, KEEP) : list);
+
+/** How many failures of each code; kept even when the list itself is cut */
+function byCode<T>(list: T[], code: (t: T) => string): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const t of list) out[code(t)] = (out[code(t)] ?? 0) + 1;
+  return out;
+}
+
+/** What to tell an agent whose path is gone, from where() */
+function forwardNote(w: WhereResult): { note: string; movedTo?: string; trashedTo?: string } | undefined {
+  const by = w.by?.agent ?? w.by?.model;
+  const tail = `${by ? ` by ${by}` : ""}${w.at ? ` at ${w.at.slice(0, 16)}Z` : ""}${w.batch ? ` (batch ${w.batch})` : ""}`;
+  if (w.status === "moved") return { note: `; moved to ${w.current}${tail}, use that path`, movedTo: w.current };
+  if (w.status === "trashed") return { note: `; trashed${tail}, wasnew_undo${w.batch ? " of that batch" : ""} brings it back`, trashedTo: w.current };
+  if (w.status === "purged") return { note: `; it was trashed${tail} and the trash has since been emptied` };
+  return undefined;
+}
+
+/** Adds where-it-went to failures whose path does not exist, with one journal read for all of them */
+async function forwardFailures<T extends { message: string }>(v: Vault, list: T[], code: (t: T) => string, pathOf: (t: T) => string | undefined): Promise<T[]> {
+  const idx = list.flatMap((t, i) => (MISSING.has(code(t)) && pathOf(t) !== undefined ? [i] : []));
+  if (!idx.length) return list;
+  const found = await v.whereMany(idx.map((i) => pathOf(list[i])!));
+  const out = [...list];
+  idx.forEach((i, k) => {
+    const f = forwardNote(found[k]);
+    if (f) out[i] = { ...out[i], message: out[i].message + f.note, ...(f.movedTo ? { movedTo: f.movedTo } : {}), ...(f.trashedTo ? { trashedTo: f.trashedTo } : {}) };
+  });
+  return out;
+}
+
+/**
+ * A failure list as results carry it: cut like any list, counted by code in `<key>ByCode` so no
+ * failure kind is ever hidden, and forwarded where a path moved.
+ */
+async function failures<T extends { code: string; message: string }>(v: Vault, key: string, list: T[], all: boolean, pathOf: (t: T) => string | undefined): Promise<Record<string, unknown>> {
+  const shown = await forwardFailures(v, cutList(list, all), (t) => t.code, pathOf);
+  return { [key]: shown, ...(list.length ? { [key + "ByCode"]: byCode(list, (t) => t.code) } : {}) };
+}
+
+const cutInfo = (shown: number, total: number) => (shown < total ? { truncated: true, total } : {});
+
+export function formatWhere(w: WhereResult): string {
+  const head = w.status === "here" ? `${w.path} is there now`
+    : w.status === "moved" ? `${w.path} moved to ${w.current}`
+    : w.status === "trashed" ? `${w.path} is in the trash at ${w.current}; undo ${w.batch ? `batch ${w.batch}` : "it"} to bring it back`
+    : w.status === "purged" ? `${w.path} was trashed and the trash was emptied`
+    : w.missing ? `${w.path} was last recorded at ${w.current}, but nothing is there now`
+    : `nothing recorded about ${w.path}`;
+  const steps = w.steps.map((s) => { const by = s.by?.agent ?? s.by?.model; return `  ${s.at}  ${s.op.padEnd(5)} ${s.from}${s.to !== undefined ? ` -> ${s.to}` : ""}${by ? `  by ${by}` : ""}${s.batch ? `  [${s.batch}]` : ""}`; });
+  return [head, ...steps].join("\n");
+}
+
+const undoOps = (list: { from: string; to: string; trashed?: true }[]): SummaryOp[] => list.map((r) => ({ op: "undo", from: r.to, to: r.from, ...(r.trashed ? { trashed: true } : {}) }));
+const recordOps = (list: { from: string; to: string; trashed?: true }[]): SummaryOp[] => list.map((r) => (r.trashed ? { op: "trash", from: r.from } : { op: "move", from: r.from, to: r.to }));
+const planOps = (ops: PlanOp[]): SummaryOp[] => ops.map((o) => (o.op === "move" ? { op: "move", from: o.from, to: o.to } : { op: "trash", from: o.path }));
+
+/** wasnew_undo's result: summary of everything undone, lists cut unless `all` */
+export function undoResult(r: UndoResult, all: boolean) {
+  const undone = cutList(r.undone, all);
+  const skipped = cutList(r.skipped, all);
+  return {
+    summary: summarizeOps(undoOps(r.undone)).lines,
+    undone,
+    skipped,
+    ...(r.skipped.length ? { skippedByCode: byCode(r.skipped, (s) => s.reason) } : {}),
+    ...cutInfo(undone.length + skipped.length, r.undone.length + r.skipped.length),
+  };
 }
 
 export function formatDiff(d: Diff, limit = 50): string {
@@ -119,9 +198,17 @@ const TOOLS: Tool[] = [
     name: "wasnew_diff",
     title: "Compare with a snapshot",
     description: "What changed since a snapshot (or between two): added, changed, missing and moved files. Use it to explain to the user what a task did.",
-    inputSchema: { type: "object", properties: { from: str("Snapshot id to compare from"), to: str("Snapshot id to compare to; omit for the current files") }, required: ["from"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { from: str("Snapshot id to compare from"), to: str("Snapshot id to compare to; omit for the current files"), full }, required: ["from"], additionalProperties: false },
     annotations: READ_ONLY,
-    async run(v, a) { const d = await v.diff(a.from, a.to); return { result: d, text: formatDiff(d) }; },
+    async run(v, a) {
+      const d = await v.diff(a.from, a.to);
+      const moved = summarizeOps(d.moved.map((m) => ({ op: "move", from: m.from, to: m.to }))).lines;
+      const [head, ...body] = formatDiff(d).split("\n");
+      const cut = { added: cutList(d.added, !!a.full), changed: cutList(d.changed, !!a.full), missing: cutList(d.missing, !!a.full), moved: cutList(d.moved, !!a.full) };
+      const shown = cut.added.length + cut.changed.length + cut.missing.length + cut.moved.length;
+      const total = d.added.length + d.changed.length + d.missing.length + d.moved.length;
+      return { result: { summary: [head, ...moved], ...cut, ...cutInfo(shown, total) }, text: [head, ...moved.map((l) => "  " + l), ...body].join("\n") };
+    },
   },
   {
     name: "wasnew_move",
@@ -137,6 +224,7 @@ const TOOLS: Tool[] = [
         batch: str("Batch id grouping this task's moves; omit to get a new one"),
         reason,
         model: str("Your model name, recorded with the change"),
+        full,
       },
       required: ["moves"],
       additionalProperties: false,
@@ -147,13 +235,17 @@ const TOOLS: Tool[] = [
       const batch: string = a.batch ?? newBatchId();
       const by = actor(ctx, a);
       const failed: { from: string; to: string; code: string; message: string }[] = [];
+      const bad = new Set<number>();
       const outside = (m: { from: string }) => {
         const abs = path.resolve(ctx.root, m.from);
         if (ctx.allowOutsideSources || abs === ctx.root || abs.startsWith(ctx.root + path.sep)) return undefined;
         return new WasnewError("OUTSIDE_ROOT", "source is outside the folder: " + m.from, m.from);
       };
-      const moved = await keepGoing(a.moves as { from: string; to: string }[], (list) => v.moveMany(list, batch, by), (m, code, message) => failed.push({ ...m, code, message }), outside);
-      return { result: { batch, moved, failed } };
+      const list = a.moves as { from: string; to: string }[];
+      const moved = await keepGoing(list, (l) => v.moveMany(l, batch, by), (m, code, message, i) => { bad.add(i); failed.push({ ...m, code, message }); }, outside);
+      const summary = summarizeOps(list.filter((_, i) => !bad.has(i))).lines;
+      const f = await failures(v, "failed", failed, !!a.full, (x) => x.from);
+      return { result: { summary, batch, moved, ...f, ...cutInfo((f.failed as unknown[]).length, failed.length) } };
     },
   },
   {
@@ -167,6 +259,7 @@ const TOOLS: Tool[] = [
         batch: str("Batch id grouping this task's changes; omit to get a new one"),
         reason,
         model: str("Your model name, recorded with the change"),
+        full,
       },
       required: ["paths"],
       additionalProperties: false,
@@ -177,8 +270,12 @@ const TOOLS: Tool[] = [
       const batch: string = a.batch ?? newBatchId();
       const by = actor(ctx, a);
       const failed: { path: string; code: string; message: string }[] = [];
-      const trashed = await keepGoing(a.paths as string[], (list) => v.trashMany(list, batch, by), (p, code, message) => failed.push({ path: p, code, message }));
-      return { result: { batch, trashed, failed } };
+      const bad = new Set<number>();
+      const list = a.paths as string[];
+      const trashed = await keepGoing(list, (l) => v.trashMany(l, batch, by), (p, code, message, i) => { bad.add(i); failed.push({ path: p, code, message }); });
+      const summary = summarizeOps(list.filter((_, i) => !bad.has(i)).map((p) => ({ op: "trash", from: p }))).lines;
+      const f = await failures(v, "failed", failed, !!a.full, (x) => x.path);
+      return { result: { summary, batch, trashed, ...f, ...cutInfo((f.failed as unknown[]).length, failed.length) } };
     },
   },
   {
@@ -199,6 +296,7 @@ const TOOLS: Tool[] = [
         },
         reason,
         model: str("Your model name, recorded with the plan"),
+        full,
       },
       required: ["ops"],
       additionalProperties: false,
@@ -212,11 +310,17 @@ const TOOLS: Tool[] = [
         }
       }
       const plan = await v.plan(a.ops, { by: actor(ctx, a) });
+      const summary = summarizeOps(planOps(plan.ops)).lines;
+      const source = (i: { index: number }) => { const op = plan.ops[i.index]; return op?.op === "move" ? op.from : op?.path; };
+      const f = await failures(v, "issues", plan.issues, !!a.full, source);
+      const issues = f.issues as typeof plan.issues;
       const text = [
         `plan ${plan.id}: ${plan.ops.length} operations, ${plan.issues.length} issues${plan.needsApproval ? `, needs the user's approval (wasnew approve ${plan.id})` : ""}`,
-        ...plan.issues.map((i) => `  #${i.index} ${i.code}: ${i.message}`),
+        ...summary.map((l) => "  " + l),
+        ...issues.map((i) => `  #${i.index} ${i.code}: ${i.message}`),
+        ...(issues.length < plan.issues.length ? [`  … ${plan.issues.length - issues.length} more issues`] : []),
       ].join("\n");
-      return { result: { id: plan.id, ops: plan.ops.length, issues: plan.issues, needsApproval: plan.needsApproval }, text };
+      return { result: { summary, id: plan.id, ops: plan.ops.length, ...f, needsApproval: plan.needsApproval, ...cutInfo(issues.length, plan.issues.length) }, text };
     },
   },
   {
@@ -225,7 +329,11 @@ const TOOLS: Tool[] = [
     description: "Run exactly the operations of a plan, once, as one undoable batch. Refuses with NEEDS_APPROVAL until the user approved a plan that needs it, and with PLAN_INVALID if the folder changed since.",
     inputSchema: { type: "object", properties: { plan: str("Plan id from wasnew_plan") }, required: ["plan"], additionalProperties: false },
     annotations: WRITES,
-    async run(v, a) { return { result: await v.apply(a.plan) }; },
+    async run(v, a) {
+      const r = await v.apply(a.plan);
+      const done = (await v.getPlan(a.plan)).ops.slice(0, r.done);
+      return { result: { summary: summarizeOps(planOps(done)).lines, ...r } };
+    },
   },
   {
     name: "wasnew_history",
@@ -233,26 +341,39 @@ const TOOLS: Tool[] = [
     description: "Everything recorded about a path and the names it had: moves, trashes, undos and restores, with when, by whom and why.",
     inputSchema: { type: "object", properties: { path: str("Path relative to the folder, current or former") }, required: ["path"], additionalProperties: false },
     annotations: READ_ONLY,
-    async run(v, a) { return { result: { events: await v.history(a.path) } }; },
+    async run(v, a) {
+      const events = await v.history(a.path);
+      const w = await v.where(a.path);   // a gone path gets where it went, as a failed call would
+      return { result: { events, ...(w.status === "moved" ? { movedTo: w.current } : {}) } };
+    },
+  },
+  {
+    name: "wasnew_where",
+    title: "Where a file is now",
+    description: "Where a path's file is now, following moves, folder moves, trash and undo in the journal. Call it when a path you knew no longer exists.",
+    inputSchema: { type: "object", properties: { path: str("Path relative to the folder, as you last knew it") }, required: ["path"], additionalProperties: false },
+    annotations: READ_ONLY,
+    async run(v, a) { const w = await v.where(a.path); return { result: w, text: formatWhere(w) }; },
   },
   {
     name: "wasnew_pending",
     title: "Moves that can still be undone",
     description: "List journaled moves not yet undone, newest first, optionally for one batch.",
-    inputSchema: { type: "object", properties: { batch: str("Only this batch"), limit: int("How many to return (default 50)") }, additionalProperties: false },
+    inputSchema: { type: "object", properties: { batch: str("Only this batch"), limit: int("How many to return (default 50)"), full }, additionalProperties: false },
     annotations: READ_ONLY,
     async run(v, a) {
       const all = await v.pendingMoves(a.batch);
-      return { result: { total: all.length, moves: all.slice(0, a.limit ?? 50) } };
+      const moves = cutList(all.slice(0, a.limit ?? 50), !!a.full);
+      return { result: { summary: summarizeOps(recordOps(all)).lines, total: all.length, moves, ...(moves.length < all.length ? { truncated: true } : {}) } };
     },
   },
   {
     name: "wasnew_undo",
     title: "Undo moves",
     description: "Undo the moves and trashes of a batch (all of it, or only its last `count`), or the last `count` overall. Never overwrites: if something now sits at the original place, that one is skipped and reported with a reason.",
-    inputSchema: { type: "object", properties: { batch: str("Batch to undo"), count: int("How many of the newest moves to undo"), reason }, additionalProperties: false },
+    inputSchema: { type: "object", properties: { batch: str("Batch to undo"), count: int("How many of the newest moves to undo"), reason, full }, additionalProperties: false },
     annotations: WRITES,
-    async run(v, a, ctx) { return { result: await v.undo({ batch: a.batch, count: a.count, by: actor(ctx, a) }) }; },
+    async run(v, a, ctx) { return { result: undoResult(await v.undo({ batch: a.batch, count: a.count, by: actor(ctx, a) }), !!a.full) }; },
   },
   {
     name: "wasnew_restore",
@@ -314,7 +435,10 @@ export async function serveMcp(opts: { root: string; input: Readable; output: Wr
           return send({ id, result: { content: [{ type: "text", text: text ?? JSON.stringify(result, null, 1) }], structuredContent: result, isError: false } });
         } catch (e: any) {
           // a tool failure is a result the model can read and act on, not a protocol error
-          const error = { code: isWasnewError(e) ? e.code : e?.code ?? "ERROR", message: String(e?.message ?? e) };
+          let error: { code: string; message: string } = { code: isWasnewError(e) ? e.code : e?.code ?? "ERROR", message: String(e?.message ?? e) };
+          // a path that is gone may have moved: say where, like the failed entries of move and trash do
+          const gone = (isWasnewError(e) ? e.path : undefined) ?? params.arguments?.path;
+          if (typeof gone === "string") [error] = await forwardFailures(vault, [error], (x) => x.code, () => gone).catch(() => [error]);
           return send({ id, result: { content: [{ type: "text", text: `${error.code}: ${error.message}` }], structuredContent: { error }, isError: true } });
         }
       }

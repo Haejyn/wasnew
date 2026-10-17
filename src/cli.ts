@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
 import { openVault, isWasnewError, type Actor, type Plan } from "./index.js";
-import { serveMcp, formatDiff, VERSION } from "./mcp.js";
+import { serveMcp, formatDiff, formatWhere, VERSION } from "./mcp.js";
 
 const HELP = `wasnew ${VERSION}: undo for what AI agents move and delete
 
@@ -26,6 +26,7 @@ usage: wasnew <command> [options]
   approve <plan>              approve a plan an agent proposed (agents cannot do this)
   apply <plan>                run an approved plan as one undoable batch
   history <path>              who moved, trashed or restored a file, when and why
+  where <path>                where a file is now, following its moves, trash and undo
   recover                     settle operations a crashed process left half-recorded
   empty-trash --older-than-days D [--apply]
                               really delete trashed files (dry run unless --apply)
@@ -145,6 +146,11 @@ async function main(argv: string[]): Promise<number> {
     case "history": {
       const events = await vault.history(need(rest[0], "history needs a path"));
       out(events, events.map((e) => `${e.at}  ${e.op.padEnd(7)} ${e.from ? `${e.from} -> ${e.to}` : e.to ?? ""}${e.undone ? " (undone)" : ""}${e.by ? `  by ${describe(e.by)}` : ""}`).join("\n") || "nothing recorded");
+      return 0;
+    }
+    case "where": {
+      const w = await vault.where(need(rest[0], "where needs a path"));
+      out(w, formatWhere(w));
       return 0;
     }
     case "recover": {

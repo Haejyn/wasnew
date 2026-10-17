@@ -41,7 +41,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "bench": "node scripts/bench.mjs",
-    "bench:git": "node scripts/bench-git.mjs"
+    "bench:git": "node scripts/bench-git.mjs",
+    "bench:tokens": "node scripts/bench-tokens.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

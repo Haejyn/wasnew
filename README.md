@@ -50,6 +50,7 @@ Claude Desktop 은 `claude_desktop_config.json` 에:
 | `wasnew_restore` | 스냅샷 내용으로 복원. 덮어쓸 파일은 먼저 `guard` 스냅샷으로 저장 |
 | `wasnew_diff` | 추가 · 변경 · 사라짐 · 이동(내용 해시로 감지). 사용자에게 한 일을 설명할 때 |
 | `wasnew_history` | 한 파일의 이동 · 휴지통 · 되돌림 · 복원을 언제, 누가, 왜 했는지 |
+| `wasnew_where` | 옛 경로의 파일이 지금 어디 있는지. 폴더째 옮긴 것, 휴지통, 되돌림까지 따라감. 없는 경로로 실패한 호출에도 `movedTo` 로 붙음 |
 | `wasnew_read` | 파일을 그 시점의 내용으로 읽기 |
 | `wasnew_log` · `wasnew_pending` | 스냅샷 목록 · 아직 되돌릴 수 있는 것 |
 
@@ -57,6 +58,7 @@ Claude Desktop 은 `claude_desktop_config.json` 에:
 - **승인 도구는 MCP 에 없다.** 에이전트는 스스로 승인할 수 없다
 - 기본은 `--root` 안의 파일만 옮긴다. 밖에서 가져오는 일은 `--allow-outside-sources` 로 켠다
 - 도구 실패는 프로토콜 에러가 아니라 `isError` 결과로 돌아온다. 에이전트가 코드를 읽고 고쳐서 다시 시도한다
+- 큰 결과는 `summary` 몇 줄(`751 × *.jpg  Downloads/ → sorted/jpg/`)과 앞 20개만 돌려준다. 50개를 넘는 목록은 `full: true` 일 때만 전부 (`pnpm bench:tokens`)
 - 셸의 `rm` · `mv` 까지 막으려면 [Claude Code 훅 예제](examples/claude-code/)
 
 ## 정책 (`.wasnew/policy.json`)
@@ -111,6 +113,7 @@ wasnew undo --batch agent-1   # -n 3 이면 마지막 3개만
 wasnew restore <id> docs/a.md
 wasnew plans · show <id> · approve <id> · apply <id>
 wasnew history <path>
+wasnew where <path>           # 옛 경로의 파일이 지금 어디 있는지
 wasnew recover                # 죽은 프로세스가 남긴 반쯤 기록된 조작 정리
 wasnew policy
 wasnew gc --keep-last 20      # 저장소 정리, 미리보기 · --apply 로 실행

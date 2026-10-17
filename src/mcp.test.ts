@@ -39,7 +39,7 @@ describe("mcp server", () => {
       { jsonrpc: "2.0", id: 3, method: "nope" },
     ]);
     expect(init.result).toMatchObject({ protocolVersion: "2025-03-26", serverInfo: { name: "wasnew" }, capabilities: { tools: {} } });
-    expect(list.result.tools.map((t: any) => t.name)).toEqual(["wasnew_snapshot", "wasnew_log", "wasnew_diff", "wasnew_move", "wasnew_trash", "wasnew_plan", "wasnew_apply", "wasnew_history", "wasnew_pending", "wasnew_undo", "wasnew_restore", "wasnew_read"]);
+    expect(list.result.tools.map((t: any) => t.name)).toEqual(["wasnew_snapshot", "wasnew_log", "wasnew_diff", "wasnew_move", "wasnew_trash", "wasnew_plan", "wasnew_apply", "wasnew_history", "wasnew_where", "wasnew_pending", "wasnew_undo", "wasnew_restore", "wasnew_read"]);
     expect(list.result.tools.every((t: any) => t.inputSchema.type === "object" && !("run" in t))).toBe(true);
     expect(rest).toEqual([{ jsonrpc: "2.0", id: 3, error: { code: -32601, message: "method not found: nope" } }]);
   });
@@ -126,6 +126,77 @@ describe("mcp server", () => {
     const [applied] = await session([call(1, "wasnew_apply", { plan: id })]);
     expect(applied.result.structuredContent).toMatchObject({ done: 2 });
     expect(await fs.readFile(path.join(root, "x", "a.txt"), "utf8")).toBe("hello\n");
+  });
+
+  it("a path that moved: failures say where it went, wasnew_where follows it", async () => {
+    const hello = { jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "claude-code" } } };
+    const [, snap, , move, trash, where, history, plan] = await session([
+      hello,
+      call(1, "wasnew_snapshot"),
+      call(2, "wasnew_move", { moves: [{ from: "a.txt", to: "Docs/a.txt" }], batch: "t1" }),
+      call(3, "wasnew_move", { moves: [{ from: "a.txt", to: "x.txt" }] }),
+      call(4, "wasnew_trash", { paths: ["a.txt"] }),
+      call(5, "wasnew_where", { path: "a.txt" }),
+      call(6, "wasnew_history", { path: "a.txt" }),
+      call(8, "wasnew_plan", { ops: [{ op: "trash", path: "a.txt" }] }),
+    ]);
+    const failed = move.result.structuredContent.failed[0];
+    expect(failed).toMatchObject({ from: "a.txt", code: "ENOENT", movedTo: "Docs/a.txt" });
+    expect(failed.message).toMatch(/; moved to Docs\/a\.txt by claude-code at \d{4}-\d\d-\d\dT\d\d:\d\dZ \(batch t1\), use that path$/);
+    expect(trash.result.structuredContent.failed[0]).toMatchObject({ code: "NOT_FOUND", movedTo: "Docs/a.txt" });
+    expect(where.result.structuredContent).toMatchObject({ status: "moved", current: "Docs/a.txt", batch: "t1" });
+    expect(where.result.content[0].text).toMatch(/^a\.txt moved to Docs\/a\.txt\n/);
+    expect(history.result.structuredContent.movedTo).toBe("Docs/a.txt");
+    expect(plan.result.structuredContent.issues[0]).toMatchObject({ code: "NOT_FOUND", movedTo: "Docs/a.txt" });
+
+    // a thrown missing-path error is forwarded too
+    const id = snap.result.structuredContent.id;
+    await session([call(1, "wasnew_move", { moves: [{ from: "b.txt", to: "B/b.txt" }] })]);
+    const [later] = await session([call(1, "wasnew_snapshot")]);
+    const [gone] = await session([call(1, "wasnew_read", { snapshot: later.result.structuredContent.id, path: "b.txt" })]);
+    expect(gone.result).toMatchObject({ isError: true, structuredContent: { error: { code: "NOT_IN_SNAPSHOT", movedTo: "B/b.txt" } } });
+    expect(gone.result.content[0].text).toContain("; moved to B/b.txt");
+    const [old] = await session([call(1, "wasnew_read", { snapshot: id, path: "b.txt" })]);
+    expect(old.result.content[0].text).toBe("bee\n");
+  });
+
+  it("big results: summary first, lists cut to 20 unless full, failures counted by code", async () => {
+    await fs.mkdir(path.join(root, "in"));
+    for (let i = 0; i < 60; i++) await fs.writeFile(path.join(root, "in", `f${i}.txt`), String(i));
+    const moves = Array.from({ length: 60 }, (_, i) => ({ from: `in/f${i}.txt`, to: `out/f${i}.txt` }));
+    const missing = Array.from({ length: 55 }, (_, i) => ({ from: `in/nope${i}.txt`, to: `out/nope${i}.txt` }));
+    const [move, pending, pendingAll, undo] = await session([
+      call(1, "wasnew_move", { moves: [...moves, ...missing], batch: "big" }),
+      call(2, "wasnew_pending", { batch: "big", limit: 100 }),
+      call(3, "wasnew_pending", { batch: "big", limit: 100, full: true }),
+      call(4, "wasnew_undo", { batch: "big" }),
+    ]);
+    const m = move.result.structuredContent;
+    expect(m).toMatchObject({ summary: ["60 × *.txt  in/ → out/"], moved: 60, failedByCode: { ENOENT: 55 }, truncated: true, total: 55 });
+    expect(m.failed).toHaveLength(20);
+    expect(Object.keys(m)[0]).toBe("summary");
+    expect(pending.result.structuredContent).toMatchObject({ summary: ["60 × *.txt  in/ → out/"], total: 60, truncated: true });
+    expect(pending.result.structuredContent.moves).toHaveLength(20);
+    expect(pendingAll.result.structuredContent.moves).toHaveLength(60);
+    expect(pendingAll.result.structuredContent.truncated).toBeUndefined();
+    const u = undo.result.structuredContent;
+    expect(u).toMatchObject({ summary: ["60 × *.txt  out/ → in/ (undone)"], truncated: true, total: 60, skipped: [] });
+    expect(u.undone).toHaveLength(20);
+
+    const [small] = await session([call(1, "wasnew_trash", { paths: ["a.txt", "b.txt"] })]);
+    expect(small.result.structuredContent).toMatchObject({ summary: ["2 × *.txt  ./ → trash"], trashed: 2, failed: [] });
+    expect(small.result.structuredContent.truncated).toBeUndefined();
+  });
+
+  it("plan, apply and diff carry a summary", async () => {
+    const [snap] = await session([call(1, "wasnew_snapshot")]);
+    const [plan] = await session([call(1, "wasnew_plan", { ops: [{ op: "move", from: "a.txt", to: "t/a.txt" }, { op: "move", from: "b.txt", to: "t/b.txt" }] })]);
+    expect(plan.result.structuredContent.summary).toEqual(["2 × *.txt  ./ → t/"]);
+    expect(plan.result.content[0].text).toContain("\n  2 × *.txt  ./ → t/");
+    const [apply, diff] = await session([call(1, "wasnew_apply", { plan: plan.result.structuredContent.id }), call(2, "wasnew_diff", { from: snap.result.structuredContent.id })]);
+    expect(apply.result.structuredContent).toMatchObject({ summary: ["2 × *.txt  ./ → t/"], done: 2 });
+    expect(diff.result.structuredContent.summary).toEqual(["0 added, 0 changed, 0 missing, 2 moved", "2 × *.txt  ./ → t/"]);
+    expect(diff.result.content[0].text.split("\n")[1]).toBe("  2 × *.txt  ./ → t/");
   });
 
   it("answers garbage with a parse error and keeps going", async () => {

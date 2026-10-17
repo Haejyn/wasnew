@@ -29,6 +29,7 @@ import { PolicyFile, type LoadedPolicy } from "./policy.js";
 export { WasnewError, isWasnewError, type WasnewErrorCode } from "./errors.js";
 export { wasnewIgnored, parseIgnore, ignoredBy } from "./ignore.js";
 export { parsePolicy, type Policy, type LoadedPolicy } from "./policy.js";
+export { summarizeOps, type SummaryOp, type OpSummary } from "./summary.js";
 
 const STORE_DIR = ".wasnew";
 const IGNORE_FILE = ".wasnewignore";
@@ -121,6 +122,25 @@ export interface ManyResult {
   failed?: OpFailure;
 }
 export interface HistoryEvent { seq: number; op: string; at: string; from?: string; to?: string; batch?: string; by?: Actor; undone?: boolean }
+/** One journal entry that carried a path along: `to` is store-relative after a trash, absent for a purge */
+export interface WhereStep { seq: number; op: "move" | "trash" | "undo" | "purge"; from: string; to?: string; at: string; by?: Actor; batch?: string }
+/**
+ * Where a path's file is now. `here`: something exists at the path. `moved`: it exists at `current`.
+ * `trashed`: it sits in the trash at `current` (store-relative); undoing `batch` brings it back.
+ * `purged`: it was trashed and the trash was emptied. `unknown`: the journal knows nothing, or
+ * (`missing`) it points at `current` but nothing is there now.
+ */
+export interface WhereResult {
+  path: string;
+  status: "here" | "moved" | "trashed" | "purged" | "unknown";
+  current?: string;
+  missing?: true;
+  /** the move or trash that put it where it is (an undone one does not count): when, by whom, which batch to undo */
+  at?: string;
+  by?: Actor;
+  batch?: string;
+  steps: WhereStep[];
+}
 export interface RecoverItem { op: string; from: string; to: string; outcome: "journaled" | "not-started" | "both-exist" | "missing" | "in-progress" }
 export interface TrashPurge { dryRun: boolean; entries: { from: string; to: string; at: string }[]; bytes: number }
 export interface VaultOptions {
@@ -1304,6 +1324,109 @@ export class Vault {
       }
     }
     return events;
+  }
+
+  /** Follows a path forward through the journal to where its file is now (see WhereResult) */
+  async where(rel: string): Promise<WhereResult> {
+    return (await this.whereMany([rel]))[0];
+  }
+
+  /**
+   * where() for several paths with one journal read. Each path is one pass over the journal:
+   * moves of the path or a folder holding it carry it along, an undo carries it back, a trash
+   * ends the chain unless undone, a purge of that trash ends it for good.
+   */
+  async whereMany(rels: string[]): Promise<WhereResult[]> {
+    const entries = await this.readJournal();
+    // normalized once for all paths: path.resolve per entry is most of the cost
+    const keys = new Map<number, { from: string; to: string }>();
+    for (const e of entries) {
+      if (e.op === "move") keys.set(e.seq, { from: this.journalKey((e as JournalMove).from), to: this.journalKey((e as JournalMove).to) });
+      else if (e.op === "trash") keys.set(e.seq, { from: this.journalKey((e as JournalTrash).from), to: (e as JournalTrash).to });   // store-relative already
+    }
+    return Promise.all(rels.map(async (rel) => {
+      const start = this.journalKey(rel);
+      const { steps, cur, inTrash, purged, placed } = this.forward(entries, keys, start);
+      const by = placed ? { at: placed.at, ...(placed.by ? { by: placed.by } : {}), ...(placed.batch ? { batch: placed.batch } : {}) } : {};
+      const out = (r: Omit<WhereResult, "path" | "steps">): WhereResult => ({ path: start, ...r, steps });
+      if (await exists(path.resolve(this.root, start))) return out({ status: "here" });
+      if (purged) return out({ status: "purged" });
+      if (inTrash) {
+        if (await exists(path.resolve(this.store, inTrash.path))) return out({ status: "trashed", current: inTrash.path, ...by });
+        return out({ status: "unknown", current: inTrash.path, missing: true });
+      }
+      if (!steps.length) return out({ status: "unknown" });
+      if (await exists(path.resolve(this.root, cur))) return out({ status: "moved", current: cur, ...by });
+      return out({ status: "unknown", current: cur, missing: true });
+    }));
+  }
+
+  /** Journal paths are stored as the caller gave them; compare them root-relative (absolute when outside) */
+  private journalKey(p: string): string {
+    const abs = path.resolve(this.root, p);
+    return this.relInside(abs) ?? toPosix(abs);
+  }
+
+  private forward(entries: JournalEntry[], keys: Map<number, { from: string; to: string }>, start: string) {
+    const fold = process.platform === "win32" || process.platform === "darwin";
+    // "" when p is `dir`, "/rest" when p is inside it, null otherwise
+    const under = (p: string, dir: string): string | null => {
+      const a = fold ? p.toLowerCase() : p, b = fold ? dir.toLowerCase() : dir;
+      if (a === b) return "";
+      return a.startsWith(b + "/") ? p.slice(dir.length) : null;
+    };
+    const steps: WhereStep[] = [];
+    const live: WhereStep[] = [];   // moves and trashes of this path not undone since
+    const trashes = new Set<number>();
+    let cur = start;
+    let inTrash: { seq: number; path: string } | undefined;
+    let purged = false;
+    const step = (e: JournalEntry, op: WhereStep["op"], from: string, to: string | undefined, m?: Movement) => {
+      const by = (e as JournalNote).by as Actor | undefined;
+      const batch = m?.batch;
+      const s: WhereStep = { seq: e.seq, op, from, ...(to !== undefined ? { to } : {}), at: e.at, ...(by ? { by } : {}), ...(batch ? { batch } : {}) };
+      steps.push(s);
+      if (op === "move" || op === "trash") live.push(s);
+      else if (op === "undo") { const i = live.findIndex((x) => x.seq === (e as JournalUndo).of); if (i >= 0) live.splice(i, 1); }
+    };
+    for (const e of entries) {
+      if (purged) break;
+      if (e.op === "move" || e.op === "trash") {
+        const m = e as Movement;
+        const { from, to } = keys.get(m.seq)!;
+        if (m.op === "trash") trashes.add(m.seq);
+        if (inTrash) continue;
+        const rest = under(cur, from);
+        if (rest === null) continue;
+        if (m.op === "move") {
+          step(e, "move", cur, to + rest, m);
+          cur = to + rest;
+        } else {
+          inTrash = { seq: m.seq, path: to + rest };
+          step(e, "trash", cur, inTrash.path, m);
+        }
+      } else if (e.op === "undo") {
+        const of = (e as JournalUndo).of;
+        const k = keys.get(of);
+        if (!k) continue;
+        if (trashes.has(of)) {
+          if (inTrash?.seq !== of) continue;
+          const rest = under(inTrash.path, k.to) ?? "";
+          step(e, "undo", inTrash.path, k.from + rest);
+          cur = k.from + rest;
+          inTrash = undefined;
+        } else if (!inTrash) {
+          const rest = under(cur, k.to);
+          if (rest === null) continue;
+          step(e, "undo", cur, k.from + rest);
+          cur = k.from + rest;
+        }
+      } else if (e.op === "purge" && inTrash && ((e as JournalNote).of as number[]).includes(inTrash.seq)) {
+        step(e, "purge", inTrash.path, undefined);
+        purged = true;
+      }
+    }
+    return { steps, cur, inTrash, purged, placed: live.at(-1) };
   }
 
   /**
