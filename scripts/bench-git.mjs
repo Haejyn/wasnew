@@ -164,8 +164,20 @@ try {
     console.log(`\n### ${name}: ${shape.files.toLocaleString("en")} files × ${human}, median of ${RUNS} run(s), ms unless noted\n`);
     console.log(`| step | ${Object.keys(TOOLS).join(" | ")} |`);
     console.log(`|---|${Object.keys(TOOLS).map(() => "---:").join("|")}|`);
+    const fmt = (s, x) => (s.includes("MB") ? x.toFixed(1) : Math.round(x).toLocaleString("en"));
     for (const s of STEPS) {
-      const cells = Object.keys(TOOLS).map((k) => { const m = median(results[k][s]); return s.includes("MB") ? m.toFixed(1) : Math.round(m).toLocaleString("en"); });
+      const cells = Object.keys(TOOLS).map((k) => fmt(s, median(results[k][s])));
+      console.log(`| ${s} | ${cells.join(" | ")} |`);
+    }
+    // the raw values too, so the spread between runs is visible
+    console.log(`\nEach run in order, min and max in brackets:\n`);
+    console.log(`| step | ${Object.keys(TOOLS).join(" | ")} |`);
+    console.log(`|---|${Object.keys(TOOLS).map(() => "---:").join("|")}|`);
+    for (const s of STEPS) {
+      const cells = Object.keys(TOOLS).map((k) => {
+        const xs = results[k][s];
+        return `${xs.map((x) => fmt(s, x)).join(" / ")} [${fmt(s, Math.min(...xs))}, ${fmt(s, Math.max(...xs))}]`;
+      });
       console.log(`| ${s} | ${cells.join(" | ")} |`);
     }
   }

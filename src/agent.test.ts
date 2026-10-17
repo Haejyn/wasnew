@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -334,5 +334,98 @@ describe("group commit", () => {
     await fs.utimes(path.join(dir, "g.json"), old, old);
     expect((await v.recover()).map((i) => i.outcome)).toEqual(["not-started"]);
     expect(await v.pendingMoves()).toEqual([]);
+  });
+
+  it("trashMany puts a whole group in one trash folder", async () => {
+    const moves = await files(300);
+    const v = await openVault(root);
+    const r = await v.trashMany(moves.map((m) => m.from), "t");
+    expect(new Set(r.trashed!.map((t) => t.split("/")[1])).size).toBe(2);   // 256 + 44
+    expect(await fs.readdir(path.join(root, ".wasnew", "trash"))).toHaveLength(2);
+  });
+
+  it("gives a fresh trash folder to a path that would collide inside the group", async () => {
+    const v = await openVault(root);
+    await fs.writeFile(path.join(root, "c.txt"), "second a\n");
+    const plan = await v.plan([
+      { op: "trash", path: "a.txt" },
+      { op: "move", from: "c.txt", to: "a.txt" },
+      { op: "trash", path: "a.txt" },            // same path again
+      { op: "trash", path: "docs/b.md" },
+      { op: "trash", path: "docs" },             // holds the one before
+      { op: "trash", path: "Taxes/2025.pdf" },   // no clash: shares the first folder
+    ]);
+    expect(plan.issues).toEqual([]);
+    expect((await v.apply(plan.id)).done).toBe(6);
+    const tos = (await v.readJournal()).filter((e) => e.op === "trash").map((e) => (e as any).to as string);
+    const ids = tos.map((t) => t.split("/")[1]);
+    expect(ids[1]).not.toBe(ids[0]);
+    expect(ids[3]).not.toBe(ids[2]);
+    expect(ids[4]).toBe(ids[0]);
+    expect(new Set(tos).size).toBe(5);
+    expect(await fs.readFile(path.join(root, ".wasnew", tos[0]), "utf8")).toBe("hello\n");
+    expect(await fs.readFile(path.join(root, ".wasnew", tos[1]), "utf8")).toBe("second a\n");
+
+    expect((await v.undo({ batch: "plan-" + plan.id })).undone).toHaveLength(6);
+    expect(await read("a.txt")).toBe("hello\n");
+    expect(await read("c.txt")).toBe("second a\n");
+    expect(await read("docs/b.md")).toBe("# b\n");
+    expect(await read("Taxes/2025.pdf")).toBe("tax\n");
+    expect(await fs.readdir(path.join(root, ".wasnew", "trash"))).toEqual([]);
+    expect((await v.history("a.txt")).filter((e) => e.op === "trash")).toHaveLength(2);
+  });
+
+  /** Makes the process "die" right after the inflight marker is written: nothing renamed, marker left behind */
+  async function crashAfterMarker(run: () => Promise<unknown>): Promise<any[]> {
+    const real = fs.writeFile;
+    const markers: any[] = [];
+    const spy = vi.spyOn(fs, "writeFile").mockImplementation(async (p: any, data: any, ...rest: any[]) => {
+      await (real as any)(p, data, ...rest);
+      if (String(p).includes(`${path.sep}inflight${path.sep}`)) { markers.push(JSON.parse(String(data))); throw new Error("crash"); }
+    });
+    try {
+      await expect(run()).rejects.toThrow("crash");
+    } finally { spy.mockRestore(); }
+    const dir = path.join(root, ".wasnew", "inflight");
+    const old = new Date(Date.now() - 60_000);
+    for (const n of await fs.readdir(dir)) await fs.utimes(path.join(dir, n), old, old);
+    return markers;
+  }
+
+  it("a single op that fails its check writes no marker", async () => {
+    const v = await openVault(root);
+    const spy = vi.spyOn(fs, "writeFile");
+    try {
+      await expect(v.move("a.txt", "docs/b.md")).rejects.toMatchObject({ code: "DEST_EXISTS" });
+      await expect(v.trash("ghost.txt")).rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect(spy.mock.calls.filter(([p]) => String(p).includes(`${path.sep}inflight${path.sep}`))).toEqual([]);
+    } finally { spy.mockRestore(); }
+  });
+
+  it("a crash right after the marker: items that looked done are flagged and recover journals nothing", async () => {
+    const v = await openVault(root);
+    await fs.writeFile(path.join(root, "taken.txt"), "someone else\n");
+    const [marker] = await crashAfterMarker(() => v.moveMany([
+      { from: "a.txt", to: "x/a.txt" },
+      { from: "ghost.txt", to: "taken.txt" },   // would fail with DEST_EXISTS, but looks done on disk
+    ], "g"));
+    expect(marker.items.map((it: any) => it.looksDone ?? false)).toEqual([false, true]);
+    expect((await v.recover()).map((i) => i.outcome)).toEqual(["not-started", "not-started"]);
+    expect(await v.pendingMoves()).toEqual([]);
+    expect(await read("a.txt")).toBe("hello\n");
+  });
+
+  it("an undo whose first item fails its check flags it, so recover never journals it", async () => {
+    const v = await openVault(root);
+    await v.move("docs/b.md", "y.md", "b");
+    await v.move("a.txt", "z.txt", "b");
+    // the undo of a.txt → z.txt now looks done: z.txt is gone and something sits at a.txt
+    await fs.rm(path.join(root, "z.txt"));
+    await fs.writeFile(path.join(root, "a.txt"), "new a\n");
+    const [marker] = await crashAfterMarker(() => v.undo({ batch: "b" }));
+    expect(marker.items.map((it: any) => it.looksDone ?? false)).toEqual([true, false]);
+    expect((await v.recover()).map((i) => i.outcome)).toEqual(["not-started", "not-started"]);
+    expect(await v.pendingMoves("b")).toHaveLength(2);
+    expect(await read("a.txt")).toBe("new a\n");
   });
 });

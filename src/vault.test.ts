@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -12,6 +12,7 @@ beforeEach(async () => {
   await fs.writeFile(path.join(root, "a.txt"), "hello\n");
   await fs.writeFile(path.join(root, "docs", "b.md"), "# b\n");
 });
+afterEach(async () => { await fs.rm(root, { recursive: true, force: true }); });
 
 describe("snapshot / restore", () => {
   it("스냅샷 → 수정 → 복원하면 내용이 돌아온다", async () => {

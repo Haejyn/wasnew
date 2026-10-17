@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -38,6 +38,29 @@ describe("stat cache", () => {
     await fs.utimes(path.join(root, "a.txt"), mtime, mtime);  // and the same mtime
     const s = await v.snapshot();
     expect((await v.readSnapshotFile(s.id, "a.txt")).toString()).toBe("HELLO\n");
+  });
+
+  it("trusts cache hits without checking each blob while the cache's snapshot exists", async () => {
+    await age("a.txt", "b.txt");
+    const v = await openVault(root);
+    await v.snapshot();
+    const spy = vi.spyOn(fs, "access");
+    try {
+      expect((await v.snapshot()).hashed).toBe(0);
+      expect(spy.mock.calls.filter(([p]) => String(p).includes(`${path.sep}objects${path.sep}`))).toEqual([]);
+    } finally { spy.mockRestore(); }
+  });
+
+  it("checks each blob when the cache's snapshot is gone, and re-reads a file whose blob is missing", async () => {
+    await age("a.txt", "b.txt");
+    const v = await openVault(root);
+    const s1 = await v.snapshot();
+    const blob = (await v.get(s1.id)).files.find((f) => f.path === "a.txt")!.hash;
+    await fs.rm(path.join(root, ".wasnew", "snapshots", s1.id + ".json"));
+    await fs.rm(path.join(root, ".wasnew", "objects", blob.slice(0, 2), blob.slice(2)));
+    const s2 = await v.snapshot();
+    expect(s2).toMatchObject({ hashed: 1, newBlobs: 1 });
+    expect((await v.readSnapshotFile(s2.id, "a.txt")).toString()).toBe("hello\n");
   });
 
   it("rehash ignores the cache", async () => {

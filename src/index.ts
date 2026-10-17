@@ -42,6 +42,12 @@ const RACY_MS = 2000;
  * and one journal write per group instead of per operation (3,004 single moves took 7.5 s on NTFS).
  */
 const GROUP_SIZE = 256;
+/** Files up to this size are read once into memory and hashed from the buffer; larger ones stream */
+const SMALL_FILE_MAX = 4 * 1024 ** 2;
+/** Files a snapshot works on at the same time (stat, hash, store) */
+const CAPTURE_CONCURRENCY = 16;
+/** Same order as String#localeCompare with no arguments, without building a collator per call */
+const byLocale = new Intl.Collator().compare;
 
 export interface SnapshotFile {
   /** root-relative, posix separators */
@@ -128,6 +134,25 @@ interface InflightItem { src: string; dst: string; entry: Record<string, unknown
 interface PerformItem extends InflightItem { kind: "move" | "trash"; caseOnly: boolean; rel: string; storeTo?: string }
 interface UndoItem extends InflightItem { m: Movement; caseOnly: boolean }
 interface GroupOutcome { done: number[]; errors: { i: number; error: unknown }[]; journalError?: unknown }
+/** Per capture: folders already made (so a blob costs no mkdir) and hashes some file of it is storing */
+interface StoreCtx { made: Set<string>; claimed: Set<string> }
+
+/**
+ * Runs `fn` over `items` with at most `limit` in flight. After the first failure no new item
+ * starts; it waits for the running ones and then throws, so nothing keeps writing after it returns.
+ */
+async function eachLimit<T>(items: T[], limit: number, fn: (item: T, i: number) => Promise<void>): Promise<void> {
+  let next = 0;
+  let failed: { error: unknown } | undefined;
+  const worker = async () => {
+    while (!failed && next < items.length) {
+      const i = next++;
+      try { await fn(items[i], i); } catch (error) { failed ??= { error }; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (failed) throw failed.error;
+}
 
 function failure(index: number, e: any): OpFailure {
   return { index, code: e?.code ?? "ERROR", message: String(e?.message ?? e) };
@@ -164,6 +189,32 @@ async function hashIfFile(abs: string): Promise<string | null> {
 function snapshotId(created: string): string {
   // readable ms timestamp + randomness — never collides, even for the same instant and content
   return created.replaceAll(/[-:.]/g, "").replace("T", "-").replace("Z", "") + "-" + randomBytes(2).toString("hex");
+}
+
+/**
+ * Trash folder ids for one group: trash/<id>/<path>, one id for the whole group so 500 trashes make
+ * one folder. Two paths of a group that are the same (trash a, move b to a, trash a) or where one
+ * holds the other (trash a/b, then a) would collide in one folder, so such a path gets a fresh id.
+ * Compared without case, since Windows and macOS see A and a as one name.
+ */
+class TrashIds {
+  private readonly slots: { id: string; used: Set<string>; held: Set<string> }[] = [];
+  for(from: string): string {
+    const key = from.toLowerCase();
+    const parts = key.split("/");
+    const ancestors = parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/"));
+    let slot = this.slots.find((s) => !s.held.has(key) && !ancestors.some((a) => s.used.has(a)));
+    if (!slot) {
+      let id: string;
+      do id = snapshotId(new Date().toISOString()); while (this.slots.some((s) => s.id === id));
+      slot = { id, used: new Set(), held: new Set() };
+      this.slots.push(slot);
+    }
+    slot.used.add(key);
+    slot.held.add(key);
+    for (const a of ancestors) slot.held.add(a);
+    return slot.id;
+  }
 }
 
 export class Vault {
@@ -228,48 +279,100 @@ export class Vault {
     }
   }
 
-  private async *walk(dir: string, rules: ReturnType<typeof parseIgnore>): AsyncGenerator<string> {
+  /** Files under `dir`, in readdir order (depth first). Sibling folders are read in parallel. */
+  private async walk(dir: string, rules: ReturnType<typeof parseIgnore>): Promise<{ abs: string; rel: string }[]> {
     let entries;
-    try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
-      if (this.ignoreNames.has(e.name)) continue;
+    try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return []; }
+    const parts = await Promise.all(entries.map(async (e) => {
+      if (this.ignoreNames.has(e.name)) return [];
       const abs = path.join(dir, e.name);
       const rel = toPosix(path.relative(this.root, abs));
-      if (e.isDirectory()) {
-        if (!ignoredBy(rules, rel, true)) yield* this.walk(abs, rules);
-      } else if (e.isFile() && !ignoredBy(rules, rel)) {
-        yield abs;
+      if (e.isDirectory()) return ignoredBy(rules, rel, true) ? [] : this.walk(abs, rules);
+      return e.isFile() && !ignoredBy(rules, rel) ? [{ abs, rel }] : [];
+    }));
+    return parts.flat();
+  }
+
+  /**
+   * Stores a file's content as a blob. Small files are read once and the buffer that is hashed is
+   * the one written. Large files are hashed first and copied only if the blob is new; the file can
+   * change between the two reads, so the hash of what was actually copied wins.
+   */
+  private async storeFile(abs: string, statSize: number, ctx: StoreCtx): Promise<{ hash: string; size: number; isNew: boolean }> {
+    if (statSize <= SMALL_FILE_MAX) {
+      const buf = await fs.readFile(abs);
+      const hash = createHash("sha256").update(buf).digest("hex");
+      if (!(await this.claim(hash, ctx))) return { hash, size: buf.length, isNew: false };
+      const [tmp] = await this.writeTmp(ctx, (t) => fs.writeFile(t, buf));
+      return { hash, size: buf.length, isNew: await this.place(tmp, hash, ctx) };
+    }
+    const first = await hashFile(abs);
+    if (ctx.claimed.has(first.hash) || (await exists(this.objPath(first.hash)))) return { ...first, isNew: false };
+    const [tmp, copied] = await this.writeTmp(ctx, async (t) => {
+      const h = createHash("sha256");
+      let size = 0;
+      const tap = new Transform({
+        transform(chunk: Buffer, _enc, done) { h.update(chunk); size += chunk.length; done(null, chunk); },
+      });
+      await pipeline(createReadStream(abs), tap, createWriteStream(t));
+      return { hash: h.digest("hex"), size };
+    });
+    if (!(await this.claim(copied.hash, ctx))) {
+      await fs.rm(tmp, { force: true });
+      return { ...copied, isNew: false };
+    }
+    return { ...copied, isNew: await this.place(tmp, copied.hash, ctx) };
+  }
+
+  /**
+   * True if this task should write the blob: no other file of the same capture took it, and it is
+   * not stored yet. Marked before the await, so two files with the same new content store it once.
+   */
+  private async claim(hash: string, ctx: StoreCtx): Promise<boolean> {
+    if (ctx.claimed.has(hash)) return false;
+    ctx.claimed.add(hash);
+    return !(await exists(this.objPath(hash)));
+  }
+
+  /** Writes a temp file in the store. tmp/ is made once per capture; gc may clear it, so ENOENT makes it again. */
+  private async writeTmp<R>(ctx: StoreCtx, write: (tmp: string) => Promise<R>): Promise<[string, R]> {
+    const tmp = path.join(this.tmpDir, randomBytes(8).toString("hex"));
+    if (!ctx.made.has(this.tmpDir)) { await fs.mkdir(this.tmpDir, { recursive: true }); ctx.made.add(this.tmpDir); }
+    try {
+      return [tmp, await write(tmp)];
+    } catch (e: any) {
+      await fs.rm(tmp, { force: true });
+      if (e?.code !== "ENOENT" || (await exists(this.tmpDir))) throw e;
+      await fs.mkdir(this.tmpDir, { recursive: true });
+      try {
+        return [tmp, await write(tmp)];
+      } catch (e2) {
+        await fs.rm(tmp, { force: true });
+        throw e2;
       }
     }
   }
 
   /**
-   * Stores a file's content as a blob. Hashes first and copies only if the blob is new.
-   * The file can change between the two reads, so the hash of what was actually copied wins.
+   * Renames a finished temp file into objects/. Returns false if another writer stored the same
+   * blob first: Windows can refuse to rename onto it (EPERM, EEXIST), and that blob is just as good.
    */
-  private async storeFile(abs: string): Promise<{ hash: string; size: number; isNew: boolean }> {
-    const first = await hashFile(abs);
-    if (await exists(this.objPath(first.hash))) return { ...first, isNew: false };
-    await fs.mkdir(this.tmpDir, { recursive: true });
-    const tmp = path.join(this.tmpDir, randomBytes(8).toString("hex"));
-    const h = createHash("sha256");
-    let size = 0;
-    const tap = new Transform({
-      transform(chunk: Buffer, _enc, done) { h.update(chunk); size += chunk.length; done(null, chunk); },
-    });
+  private async place(tmp: string, hash: string, ctx: StoreCtx): Promise<boolean> {
+    const dest = this.objPath(hash);
+    const dir = path.dirname(dest);
     try {
-      await pipeline(createReadStream(abs), tap, createWriteStream(tmp));
-      const hash = h.digest("hex");
-      const dest = this.objPath(hash);
-      if (await exists(dest)) {
-        await fs.rm(tmp, { force: true });
-        return { hash, size, isNew: false };
+      if (!ctx.made.has(dir)) { await fs.mkdir(dir, { recursive: true }); ctx.made.add(dir); }
+      try {
+        await fs.rename(tmp, dest);
+      } catch (e: any) {
+        if (e?.code !== "ENOENT") throw e;
+        await fs.mkdir(dir, { recursive: true });
+        await fs.rename(tmp, dest);
       }
-      await fs.mkdir(path.dirname(dest), { recursive: true });
-      await fs.rename(tmp, dest);
-      return { hash, size, isNew: true };
+      return true;
     } catch (e) {
       await fs.rm(tmp, { force: true });
+      if (await exists(dest)) return false;
       throw e;
     }
   }
@@ -293,25 +396,36 @@ export class Vault {
     }
   }
 
-  private async capture(rels: string[], label: string | undefined, partial: boolean, opts: { cache?: StatCache; skipIfUnchanged?: boolean } = {}): Promise<SnapshotResult> {
-    const files: SnapshotFile[] = [];
+  /**
+   * The cache's hashes all come from its snapshot's manifest. While that manifest exists its blobs
+   * are live for gc (and gc also keeps every blob the cache names), so a cache hit needs no check
+   * that its blob is there. Without the manifest each hit checks its blob.
+   */
+  private async cacheTrusted(cache: StatCache): Promise<boolean> {
+    if (typeof cache.snapshot !== "string") return false;
+    try { return await exists(this.manifestPath(cache.snapshot)); } catch { return false; }
+  }
+
+  private async capture(rels: string[], label: string | undefined, partial: boolean, opts: { cache?: StatCache; trustCache?: boolean; skipIfUnchanged?: boolean } = {}): Promise<SnapshotResult> {
+    const files: SnapshotFile[] = new Array(rels.length);
     const stats = new Map<string, { size: number; mtimeMs: number }>();
     let newBlobs = 0, hashed = 0;
-    for (const rel of rels) {
+    const ctx: StoreCtx = { made: new Set(), claimed: new Set() };
+    await eachLimit(rels, CAPTURE_CONCURRENCY, async (rel, i) => {
       const abs = this.resolveInside(rel);
       const st = await fs.stat(abs);
       stats.set(rel, { size: st.size, mtimeMs: st.mtimeMs });
       const known = opts.cache?.files[rel];
-      if (known && known[0] === st.size && known[1] === st.mtimeMs && (await exists(this.objPath(known[2])))) {
-        files.push({ path: rel, hash: known[2], size: st.size });
-        continue;
+      if (known && known[0] === st.size && known[1] === st.mtimeMs && (opts.trustCache || (await exists(this.objPath(known[2]))))) {
+        files[i] = { path: rel, hash: known[2], size: st.size };
+        return;
       }
-      const stored = await this.storeFile(abs);
+      const stored = await this.storeFile(abs, st.size, ctx);
       hashed++;
-      files.push({ path: rel, hash: stored.hash, size: stored.size });
+      files[i] = { path: rel, hash: stored.hash, size: stored.size };
       if (stored.isNew) newBlobs++;
-    }
-    files.sort((a, b) => a.path.localeCompare(b.path));
+    });
+    files.sort((a, b) => byLocale(a.path, b.path));
     if (opts.skipIfUnchanged && opts.cache?.snapshot) {
       const last = await this.get(opts.cache.snapshot).catch(() => null);
       if (last && last.files.length === files.length && last.files.every((f, i) => f.path === files[i].path && f.hash === files[i].hash)) {
@@ -345,14 +459,20 @@ export class Vault {
    * `skipIfUnchanged` returns the last snapshot instead of making an identical one.
    */
   async snapshot(opts: { label?: string; include?: (relative: string, size: number) => boolean | Promise<boolean>; rehash?: boolean; skipIfUnchanged?: boolean } = {}): Promise<SnapshotResult> {
-    const rels: string[] = [];
-    for await (const abs of this.walk(this.root, await this.ignoreRules())) {
-      const rel = toPosix(path.relative(this.root, abs));
-      if (opts.include && !(await opts.include(rel, (await fs.stat(abs)).size))) continue;
-      rels.push(rel);
+    // the stat cache is read while the folder is walked
+    const cached = this.readStatCache().then(async (c) => ({ cache: c, trusted: !opts.rehash && (await this.cacheTrusted(c)) }));
+    const found = await this.walk(this.root, await this.ignoreRules());
+    let rels = found.map((f) => f.rel);
+    if (opts.include) {
+      // stat in parallel, but ask `include` in walk order, one at a time, as before
+      const sizes: number[] = new Array(found.length);
+      await eachLimit(found, CAPTURE_CONCURRENCY, async (f, i) => { sizes[i] = (await fs.stat(f.abs)).size; });
+      const kept: string[] = [];
+      for (let i = 0; i < rels.length; i++) if (await opts.include(rels[i], sizes[i])) kept.push(rels[i]);
+      rels = kept;
     }
-    const cache = await this.readStatCache();
-    return this.capture(rels, opts.label, false, { cache: opts.rehash ? { snapshot: cache.snapshot, files: {} } : cache, skipIfUnchanged: opts.skipIfUnchanged });
+    const { cache, trusted: trustCache } = await cached;
+    return this.capture(rels, opts.label, false, { cache: opts.rehash ? { snapshot: cache.snapshot, files: {} } : cache, trustCache, skipIfUnchanged: opts.skipIfUnchanged });
   }
 
   /**
@@ -491,8 +611,8 @@ export class Vault {
     if (toId) {
       for (const f of (await this.get(toId)).files) after.set(f.path, f.hash);
     } else {
-      for await (const abs of this.walk(this.root, await this.ignoreRules())) {
-        after.set(toPosix(path.relative(this.root, abs)), (await hashFile(abs)).hash);
+      for (const { abs, rel } of await this.walk(this.root, await this.ignoreRules())) {
+        after.set(rel, (await hashFile(abs)).hash);
       }
     }
     const changed: string[] = [];
@@ -541,6 +661,11 @@ export class Vault {
     for (const s of snapshots) {
       if (dropIds.has(s.id)) continue;
       for (const f of (await this.get(s.id)).files) live.add(f.hash);
+    }
+    // the next snapshot reuses the stat cache's hashes without reading the files, so their blobs
+    // stay even when the cache's own snapshot is dropped (that snapshot's manifest still goes)
+    for (const known of Object.values((await this.readStatCache()).files)) {
+      if (typeof known?.[2] === "string") live.add(known[2]);
     }
     let blobs = 0, bytes = 0;
     const objects = path.join(this.store, "objects");
@@ -621,25 +746,39 @@ export class Vault {
    * are not blocked by them. `keepGoing` false stops at the first failure (move, trash); true
    * carries on (undo).
    */
-  private async group<T extends InflightItem>(items: T[], check: (item: T) => Promise<void>, keepGoing: boolean, onDone?: (item: T) => void): Promise<GroupOutcome> {
+  private async group<T extends InflightItem>(items: T[], check: (item: T) => Promise<boolean>, keepGoing: boolean, made: Set<string>, onDone?: (item: T) => void): Promise<GroupOutcome> {
     const out: GroupOutcome = { done: [], errors: [] };
     if (!items.length) return out;
+    // The first item is checked before the marker is written. Nothing of the group ran yet, so it
+    // sees the same folder as it would right before its rename, and a single op that fails its
+    // check writes no marker at all. `check` returns true when it saw the destination missing or
+    // the source present, which already rules out "looks done" without another stat.
+    let firstFailed = false, firstProved = false;
+    try {
+      firstProved = await check(items[0]);
+    } catch (error) {
+      out.errors.push({ i: 0, error });
+      if (!keepGoing || items.length === 1) return out;
+      firstFailed = true;
+    }
     // An item whose destination is already there and whose source is not looks done before
     // anything ran. recover() must not mistake that for our work, so the marker says so.
-    const marked: InflightItem[] = await Promise.all(items.map(async ({ src, dst, entry }) => {
-      const looksDone = (await exists(dst)) && !(await exists(src));
+    // A first item that failed its check is never renamed; marking it keeps recover off it too.
+    const marked: InflightItem[] = await Promise.all(items.map(async ({ src, dst, entry }, i) => {
+      const looksDone = i === 0 && firstFailed ? true
+        : i === 0 && firstProved ? false
+        : (await exists(dst)) && !(await exists(src));
       return { src, dst, entry, ...(looksDone ? { looksDone } : {}) };
     }));
-    await fs.mkdir(this.inflightDir, { recursive: true });
     const file = path.join(this.inflightDir, `${Date.now()}-${process.pid}-${randomBytes(3).toString("hex")}.json`);
     const at = new Date().toISOString();
-    await fs.writeFile(file, JSON.stringify({ pid: process.pid, at, items: marked }));
-    const made = new Set<string>();
+    await this.writeMarker(file, JSON.stringify({ pid: process.pid, at, items: marked }));
     const tried: number[] = [];   // reached the rename
     const ats: string[] = [];
     for (let i = 0; i < items.length; i++) {
       try {
-        await check(items[i]);
+        if (i === 0) { if (firstFailed) continue; }
+        else await check(items[i]);
         tried.push(i);
         await this.renameInto(items[i].src, items[i].dst, made);
         out.done.push(i);
@@ -669,6 +808,19 @@ export class Vault {
     return out;
   }
 
+  /** inflight/ is made once per Vault, not per group; if it went away since, make it again */
+  private inflightMade = false;
+  private async writeMarker(file: string, text: string): Promise<void> {
+    if (!this.inflightMade) { await fs.mkdir(this.inflightDir, { recursive: true }); this.inflightMade = true; }
+    try {
+      await fs.writeFile(file, text);
+    } catch (e: any) {
+      if (e?.code !== "ENOENT") throw e;
+      await fs.mkdir(this.inflightDir, { recursive: true });
+      await fs.writeFile(file, text);
+    }
+  }
+
   /**
    * Judges from disk which marker items were carried out. Walks back from the last item and
    * undoes each done one in a virtual view, so a chain (a→b, then b→c) counts both: b is gone
@@ -693,8 +845,9 @@ export class Vault {
   }
 
   /**
-   * mkdir once per folder per group. A folder made earlier in the group can have been moved away
-   * by a later op of the same group, so ENOENT on a cached folder makes it again and retries once.
+   * mkdir once per folder per call (shared by its groups). A folder made earlier can have been
+   * moved away by a later op or removed by someone else, so ENOENT on a cached folder makes it
+   * again and retries once.
    */
   private async renameInto(fromAbs: string, toAbs: string, made: Set<string>): Promise<void> {
     const dir = path.dirname(toAbs);
@@ -807,11 +960,13 @@ export class Vault {
     let done = 0;
     const trashed: string[] = [];
     const fail = (index: number, error: unknown) => ({ done, trashed, failed: failure(index, error), error });
+    const made = new Set<string>();
     for (let start = 0; start < ops.length; start += GROUP_SIZE) {
       const chunk = ops.slice(start, start + GROUP_SIZE);
       // resolve paths first (no disk access) so the marker can list the whole group
       const items: PerformItem[] = [];
       let bad: { index: number; error: unknown } | undefined;
+      const trashIds = new TrashIds();
       for (let k = 0; k < chunk.length; k++) {
         const op = chunk[k];
         try {
@@ -826,7 +981,7 @@ export class Vault {
             const src = this.resolveInside(op.path);
             if (src === this.root) throw new WasnewError("POLICY_DENIED", "cannot trash the whole folder");
             const from = toPosix(path.relative(this.root, src));
-            const to = `trash/${snapshotId(new Date().toISOString())}/${from}`;
+            const to = `trash/${trashIds.for(from)}/${from}`;
             const entry = { op: "trash", from, to, ...(batch ? { batch } : {}), ...(by ? { by } : {}) };
             items.push({ kind: "trash", src, dst: path.join(this.store, to), entry, caseOnly: false, rel: op.path, storeTo: to });
           }
@@ -845,7 +1000,8 @@ export class Vault {
         }
         policy ??= await this.policy();   // once per group, read when the first op gets this far
         await this.checkPolicy(policy, item.kind, item.src, item.kind === "move" ? item.dst : null, batch, pending);
-      }, false, () => { pending++; });
+        return !item.caseOnly;   // saw the destination missing (move) or the source present (trash)
+      }, false, made, () => { pending++; });
       if (out.journalError !== undefined) return fail(start + out.done[0], out.journalError);
       done += out.done.length;
       for (const i of out.done) if (items[i].storeTo) trashed.push(items[i].storeTo!);
@@ -941,11 +1097,13 @@ export class Vault {
     const targets = (opts.batch === undefined ? active : active.filter((m) => m.batch === opts.batch)).slice(-count).reverse();
     const undone: MoveRecord[] = [];
     const skipped: UndoSkip[] = [];
+    const made = new Set<string>();
     for (let start = 0; start < targets.length; start += GROUP_SIZE) {
       const chunk = targets.slice(start, start + GROUP_SIZE);
       const items: UndoItem[] = [];
       const skips = new Map<Movement, { reason: string; message: string }>();
       const why = (e: any, fallback: string) => ({ reason: e?.code ?? fallback, message: String(e?.message ?? e) });
+      const missing = (item: UndoItem) => ({ code: "MISSING", message: "the moved file is no longer there: " + item.m.to });
       for (const m of chunk) {
         try {
           const moved = m.op === "trash" ? this.trashPath(m.to) : this.resolveInside(m.to);
@@ -958,9 +1116,11 @@ export class Vault {
       }
       const out = await this.group(items, async (item) => {
         if (!item.caseOnly && (await exists(item.dst))) throw { code: "ORIGIN_OCCUPIED", message: "something now exists at the original place: " + item.m.from };
-        if (!(await exists(item.src))) throw { code: "MISSING", message: "the moved file is no longer there: " + item.m.to };
-      }, true);
-      for (const { i, error } of out.errors) skips.set(items[i].m, why(error, "ERROR"));
+        // a case-only undo checks its source here; otherwise a missing source fails the rename with ENOENT
+        if (item.caseOnly && !(await exists(item.src))) throw missing(item);
+        return true;   // saw the original place free, or the source present
+      }, true, made);
+      for (const { i, error } of out.errors) skips.set(items[i].m, why((error as any)?.code === "ENOENT" ? missing(items[i]) : error, "ERROR"));
       const journaled = out.journalError === undefined ? out.done : [];
       if (out.journalError !== undefined) for (const i of out.done) skips.set(items[i].m, why(out.journalError, "ERROR"));
       const ok = new Set(journaled.map((i) => items[i].m));
@@ -996,10 +1156,7 @@ export class Vault {
   private async pruneEmptyDirs(dirAbs: string, stopAt = this.root): Promise<void> {
     let cur = dirAbs;
     while (cur !== stopAt && cur.startsWith(stopAt + path.sep)) {
-      try {
-        if ((await fs.readdir(cur)).length > 0) return;
-        await fs.rmdir(cur);
-      } catch { return; }
+      try { await fs.rmdir(cur); } catch { return; }   // refuses a folder that is not empty
       cur = path.dirname(cur);
     }
   }

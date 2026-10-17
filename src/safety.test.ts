@@ -91,7 +91,8 @@ describe("restore guard", () => {
 });
 
 describe("snapshot streams", () => {
-  it("never reads a user file whole into memory", async () => {
+  it("never reads a large user file whole into memory (small ones are read in one go)", async () => {
+    await fs.writeFile(path.join(root, "big.bin"), Buffer.alloc(4 * 1024 ** 2 + 1, 7));
     const v = await openVault(root);
     const real = fs.readFile;
     const whole: string[] = [];
@@ -102,7 +103,10 @@ describe("snapshot streams", () => {
     try {
       await v.snapshot();
     } finally { (fs as any).readFile = real; }
-    expect(whole.filter((p) => !p.endsWith(".wasnewignore"))).toEqual([]);
+    expect(whole.filter((p) => p.endsWith("big.bin"))).toEqual([]);
+    expect(whole.filter((p) => p.endsWith("a.txt"))).toHaveLength(1);
+    const s = await v.get((await v.log())[0].id);
+    expect(s.files.find((f) => f.path === "big.bin")?.size).toBe(4 * 1024 ** 2 + 1);
   });
 
   it("stores the same content once and leaves no temp files", async () => {
@@ -111,6 +115,41 @@ describe("snapshot streams", () => {
     const s = await v.snapshot();
     expect(s.newBlobs).toBe(2);
     expect(await fs.readdir(path.join(root, ".wasnew", "tmp"))).toEqual([]);
+  });
+});
+
+describe("concurrent snapshots", () => {
+  it("a blob another writer placed first counts as stored when the rename onto it is refused", async () => {
+    const v = await openVault(root);
+    const real = fs.rename;
+    let refused = 0;
+    // the other writer wins the race, then Windows refuses to rename onto its blob
+    (fs as any).rename = async (a: string, b: string) => {
+      if (b.includes(`${path.sep}objects${path.sep}`) && refused === 0) {
+        refused++;
+        await fs.copyFile(a, b);
+        throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+      }
+      return real(a, b);
+    };
+    let s;
+    try { s = await v.snapshot(); } finally { (fs as any).rename = real; }
+    expect(refused).toBe(1);
+    expect(s.newBlobs).toBe(1);
+    expect(await fs.readdir(path.join(root, ".wasnew", "tmp"))).toEqual([]);
+    expect((await v.readSnapshotFile(s.id, "a.txt")).toString()).toBe("hello\n");
+    expect((await v.readSnapshotFile(s.id, "docs/b.md")).toString()).toBe("# b\n");
+  });
+
+  it("two snapshots of the same new files at once leave intact blobs and no temp files", async () => {
+    for (let i = 0; i < 40; i++) await fs.writeFile(path.join(root, `f${i}.txt`), `same ${i % 10}\n`);
+    const [v1, v2] = await Promise.all([openVault(root), openVault(root)]);
+    const [s1, s2] = await Promise.all([v1.snapshot(), v2.snapshot()]);
+    expect(await fs.readdir(path.join(root, ".wasnew", "tmp"))).toEqual([]);
+    for (const snap of [s1, s2]) {
+      expect(snap.fileCount).toBe(42);
+      for (const f of (await v1.get(snap.id)).files) expect((await v1.readSnapshotFile(snap.id, f.path)).toString()).toBe(await read(f.path));
+    }
   });
 });
 
@@ -189,6 +228,25 @@ describe("gc", () => {
     expect((await v.log()).map((s) => s.label)).toEqual(["new"]);
     expect(await read("a.txt")).toBe("v2\n");
     expect(await read("docs/b.md")).toBe("# b\n");
+  });
+
+  it("keeps the blobs the stat cache relies on when the cache's snapshot is dropped", async () => {
+    const t = new Date(Date.now() - 60_000);
+    for (const rel of ["a.txt", "docs/b.md"]) await fs.utimes(path.join(root, rel), t, t);   // past the racy window
+    const v = await openVault(root);
+    const cached = await v.snapshot({ label: "cached" });
+    // a newer snapshot that is not the cache's, so keepLast 1 drops the one the cache names
+    await v.importSnapshot("imported", new Date(Date.now() + 60_000).toISOString(), "imported", [{ path: "other.txt", content: Buffer.from("x") }]);
+    const objects = path.join(root, ".wasnew", "objects");
+    const past = new Date(Date.now() - 3_600_000);
+    for (const d of await fs.readdir(objects)) for (const f of await fs.readdir(path.join(objects, d))) await fs.utimes(path.join(objects, d, f), past, past);
+
+    const r = await v.gc({ keepLast: 1, dryRun: false });
+    expect(r).toMatchObject({ snapshots: [cached.id], blobs: 0 });
+    const s = await v.snapshot();
+    expect(s.hashed).toBe(0);                                          // the cache still answered
+    expect((await v.readSnapshotFile(s.id, "a.txt")).toString()).toBe("hello\n");
+    expect((await v.readSnapshotFile(s.id, "docs/b.md")).toString()).toBe("# b\n");
   });
 
   it("always keeps the newest snapshot and young blobs", async () => {
