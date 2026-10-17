@@ -2,84 +2,94 @@
 
 # wasnew
 
-AI 에이전트가 옮기고 지운 파일을 작업 단위로 되돌린다. git 밖에서도.
+wasnew is an undo layer for AI agents' file operations: it journals every move, rename and delete an agent makes in any folder, and undoes them per task, with or without git.
 
-![tests](https://img.shields.io/badge/tests-78%20passed-16a34a)
+[English](README.md) | [한국어](README.ko.md)
+
+![tests](https://img.shields.io/badge/tests-114%20passed-16a34a)
 ![node](https://img.shields.io/badge/node-%E2%89%A520-339933)
 ![deps](https://img.shields.io/badge/dependencies-0-111111)
-![mcp](https://img.shields.io/badge/MCP-12%20tools-111111)
+![mcp](https://img.shields.io/badge/MCP-13%20tools-111111)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
-> 아이콘은 삭(新月), 달이 새것(new)이었던(was) 순간입니다. 아래 머리카락만 한 빛이 곧 [willnew](https://github.com/Haejyn/willnew) 의 초승달이 됩니다.
+Agents sort Downloads folders, rename photo libraries and clean up project trees. The Claude Code docs state: "Checkpointing does not track files modified by Bash commands", and they give `rm`, `mv` and `cp` as examples ([source](https://code.claude.com/docs/en/checkpointing)). git covers committed files in a repository and nothing else.
 
-## 왜
+wasnew gives the agent MCP tools to move and trash files instead. Each change is written to a journal in the folder with who did it and why, deletes go to a trash folder, and one command undoes a whole task.
 
-git은 커밋한 파일만 되돌린다. 커밋 안 한 파일, git 밖 폴더, 에이전트가 한 일만 골라 되돌리기는 wasnew가 맡는다.
+> The icon is the new moon, the moment the moon was new. The hairline of light at the bottom becomes the crescent of [willnew](https://github.com/Haejyn/willnew).
 
-| | git | wasnew |
-|---|---|---|
-| 대상 | 커밋한 파일 | 아무 폴더의 아무 파일 |
-| 필요한 것 | git 바이너리 | Node 20+, 의존성 0개, `.wasnew/` 폴더 하나 |
-| 지우기 | `reset --hard` · `clean` | 휴지통으로 옮길 뿐. 진짜 삭제는 사람의 `empty-trash` 뿐 |
-| 이동 | 삭제 + 추가로 추론 | 저널에 기록, 작업(batch) 단위로 되돌림 |
-| 누가 · 왜 | 커밋 작성자 | 이동마다 에이전트 · 모델 · 사유, `history` 로 파일의 이름 변천까지 |
-| 큰 변경 | 리뷰는 저장소 밖의 일 | 정책을 넘으면 계획만 가능, 사람이 `approve` 해야 적용 |
-| 되돌리기 충돌 | 사람이 해결 | 원래 자리에 새 파일이 있으면 덮지 않고 이유와 함께 건너뜀 |
+## Quick start
 
-## 에이전트에 붙이기 (MCP)
+wasnew is not on npm yet. Install from source (Node 20 or newer, pnpm):
 
 ```bash
+git clone https://github.com/Haejyn/wasnew && cd wasnew
 pnpm install && pnpm build
-claude mcp add --transport stdio wasnew -- node /path/to/wasnew/bin/wasnew.js mcp --root ~/Downloads
+claude mcp add --transport stdio wasnew -- node "$PWD/bin/wasnew.js" mcp --root ~/Downloads
 ```
 
-Claude Desktop 은 `claude_desktop_config.json` 에:
+For Claude Desktop, add to `claude_desktop_config.json`:
 
 ```json
 { "mcpServers": { "wasnew": { "command": "node", "args": ["/path/to/wasnew/bin/wasnew.js", "mcp", "--root", "C:/Users/me/Downloads"] } } }
 ```
 
-| 도구 | 하는 일 |
+## An agent session
+
+```text
+user   sort my downloads, trash the .tmp junk
+agent  wasnew_snapshot  "before sorting Downloads"   → 20261017-104203512-a1f3
+agent  wasnew_move      214 moves, batch sort-dl     → 151 × *.jpg  ./ → Pictures/2026/
+                                                       63 × *.pdf  ./ → Docs/
+agent  wasnew_trash     12 paths, batch sort-dl      → 12 × *.tmp  ./ → trash
+agent  wasnew_diff      from 20261017-104203512-a1f3 → 0 added, 0 changed, 12 missing, 214 moved
+user   wasnew undo --batch sort-dl                   → undone 226
+```
+
+## MCP tools
+
+| Tool | What it does |
 |---|---|
-| `wasnew_snapshot` | 지금 내용을 저장. 여러 파일을 바꾸기 전에 |
-| `wasnew_move` | 이동 · 이름 바꾸기. 목적지가 있으면 `DEST_EXISTS` 로 거부. 작업마다 batch 하나, `reason` 으로 사유 |
-| `wasnew_trash` | 지우기 대신 휴지통으로. `wasnew_undo` 로 되돌림 |
-| `wasnew_plan` | 이동 · 휴지통 목록을 아무것도 건드리지 않고 검사. 조작마다 문제와 승인 필요 여부를 알려 줌 |
-| `wasnew_apply` | 계획을 정확히 그대로, 한 번만, 한 batch 로. 승인 전이면 `NEEDS_APPROVAL`, 그 사이 폴더가 바뀌었으면 `PLAN_INVALID` |
-| `wasnew_undo` | 묶음 전체, 묶음의 마지막 N개, 또는 마지막 N개를 되돌림. 못 되돌린 것은 이유와 함께 |
-| `wasnew_restore` | 스냅샷 내용으로 복원. 덮어쓸 파일은 먼저 `guard` 스냅샷으로 저장 |
-| `wasnew_diff` | 추가 · 변경 · 사라짐 · 이동(내용 해시로 감지). 사용자에게 한 일을 설명할 때 |
-| `wasnew_history` | 한 파일의 이동 · 휴지통 · 되돌림 · 복원을 언제, 누가, 왜 했는지 |
-| `wasnew_where` | 옛 경로의 파일이 지금 어디 있는지. 폴더째 옮긴 것, 휴지통, 되돌림까지 따라감. 없는 경로로 실패한 호출에도 `movedTo` 로 붙음 |
-| `wasnew_read` | 파일을 그 시점의 내용으로 읽기 |
-| `wasnew_log` · `wasnew_pending` | 스냅샷 목록 · 아직 되돌릴 수 있는 것 |
+| `wasnew_snapshot` | Save the current content of every file. Call before changing many files |
+| `wasnew_move` | Move or rename. An existing destination fails with `DEST_EXISTS`. One batch per task, `reason` says why |
+| `wasnew_trash` | Delete by moving to the folder's trash. `wasnew_undo` brings it back |
+| `wasnew_plan` | Check a list of moves and trashes without touching anything. Reports issues per operation and whether approval is needed |
+| `wasnew_apply` | Run a plan exactly, once, as one batch. `NEEDS_APPROVAL` before approval, `PLAN_INVALID` if the folder changed since |
+| `wasnew_undo` | Undo a whole batch, the last N of a batch, or the last N overall. What can't be undone is reported with a reason |
+| `wasnew_restore` | Restore content from a snapshot. Files it overwrites are saved first in a `guard` snapshot |
+| `wasnew_diff` | Added, changed, missing and moved files (moves found by content hash). For telling the user what a task did |
+| `wasnew_history` | Moves, trashes, undos and restores of one file: when, by whom, why |
+| `wasnew_where` | Where the file at an old path is now, following folder moves, trash and undo. Calls that fail on a missing path also get `movedTo` |
+| `wasnew_read` | Read a file as it was in a snapshot |
+| `wasnew_log` | List snapshots |
+| `wasnew_pending` | Moves that can still be undone |
 
-- 접속한 클라이언트 이름(`clientInfo`)이 에이전트로 기록되고, 모델은 `model` · `reason` 을 덧붙인다
-- **승인 도구는 MCP 에 없다.** 에이전트는 스스로 승인할 수 없다
-- 기본은 `--root` 안의 파일만 옮긴다. 밖에서 가져오는 일은 `--allow-outside-sources` 로 켠다
-- 도구 실패는 프로토콜 에러가 아니라 `isError` 결과로 돌아온다. 에이전트가 코드를 읽고 고쳐서 다시 시도한다
-- 큰 결과는 `summary` 몇 줄(`751 × *.jpg  Downloads/ → sorted/jpg/`)과 앞 20개만 돌려준다. 50개를 넘는 목록은 `full: true` 일 때만 전부 (`pnpm bench:tokens`)
-- 셸의 `rm` · `mv` 까지 막으려면 [Claude Code 훅 예제](examples/claude-code/)
+- The MCP client name (`clientInfo`) is recorded as the agent; the model adds `model` and `reason`.
+- There is no approve tool in MCP. An agent cannot approve its own plan.
+- By default only files inside `--root` can be moved. `--allow-outside-sources` lets agents move files in from outside.
+- Tool failures come back as `isError` results, not protocol errors, so the agent can read the code and retry.
+- Large results return a few `summary` lines (`751 × *.jpg  Downloads/ → sorted/jpg/`) and the first 20 items, with `truncated: true`. Lists over 50 come back in full only with `full: true`. See [Token cost](#token-cost).
+- To also block shell `rm` and `mv`, use the [Claude Code hook example](examples/claude-code/).
 
-## 정책 (`.wasnew/policy.json`)
+## Policy (`.wasnew/policy.json`)
 
 ```json
 { "protect": ["Taxes/", "*.key"], "requireApprovalOver": 20, "maxOpsPerBatch": 1000, "allowTrash": true }
 ```
 
-| 키 | 뜻 |
+| Key | Meaning |
 |---|---|
-| `protect` | gitignore 문법. 옮기기 · 휴지통 · 그 자리로 옮겨 오기 모두 거부. 보호된 파일을 품은 폴더도 |
-| `requireApprovalOver` | 이보다 많은 조작은 계획 → 사람의 `approve` → 적용으로만 |
-| `maxOpsPerBatch` | 한 batch 의 최대 조작 수 (폭발 반경) |
-| `allowTrash` | `false` 면 휴지통도 끔 |
+| `protect` | gitignore syntax. Moving, trashing or moving onto these paths is refused, including folders that contain them |
+| `requireApprovalOver` | More operations than this go through plan → `approve` by a person → apply |
+| `maxOpsPerBatch` | Most operations in one batch (blast radius) |
+| `allowTrash` | `false` turns off trashing too |
 
-정책 파일이 잘못되면 고칠 때까지 모든 조작이 `POLICY_INVALID`로 막힌다.
+If the policy file is invalid, every operation fails with `POLICY_INVALID` until it is fixed.
 
-## 계획 → 승인 → 적용
+## Plan → approve → apply
 
 ```text
-agent  wasnew_plan   → plan baebff75: 3 operations, needs the user's approval
+agent  wasnew_plan   → plan baebff75: 3 operations, 0 issues, needs the user's approval (wasnew approve baebff75)
 person wasnew show baebff75
 person wasnew approve baebff75
 agent  wasnew_apply  → done 3, batch plan-baebff75
@@ -88,105 +98,209 @@ person wasnew history "copy of notes.md"
 person wasnew undo --batch plan-baebff75
 ```
 
-계획은 앞선 조작의 결과를 따라가며 검사한다. 이미 옮겨진 원본, 계획 안에서 겹치는 목적지, 보호 경로, 한도를 조작 번호와 함께 알려 준다.
+A plan is checked in order, each operation against the result of the ones before it. Sources already moved, destinations that collide within the plan, protected paths and limits are reported with the operation number.
 
-## 실측
+## Benchmarks
 
-| 항목 | 결과 |
-|---|---|
-| 스냅샷 (파일 2,626개, 1 GiB 하나 포함) | 5.4 s, 최대 RSS 162 MB (스트리밍 해시, 파일을 통째로 올리지 않음) |
-| 같은 폴더 다시 스냅샷 | 0.24 s, 다시 읽은 파일 0개 (크기 · 수정 시각 캐시) |
-| 이동 2,625건 (저널 잠금 · 크래시 표식 포함) | 2.9 s |
-| 그 묶음 되돌리기 | 2.9 s, 2,625건 전부, 빈 폴더 정리 |
+wasnew against git on the same jobs (`scripts/bench-git.mjs`). Median of 3 runs, milliseconds unless noted. Windows 11 on NTFS, Intel i5-12400F (12 threads), Node 24.14, git 2.53.0.windows.2, 2026-10-17. Other processes kept the CPU about 30% busy during the runs, so absolute times are noisy; compare within a row.
 
-- 세 번 잰 중앙값. Linux · Intel Xeon 2.1 GHz 4코어 · Node 22.22 · 2026-10-02 (`pnpm bench`)
+On the git side, reorganize is `fs.rename` then `git add -A && git commit`, undo is `git reset --hard HEAD~1`, and trash is `git rm` then `git reset --hard`. The third column runs git with compression off, which is fairer for incompressible data.
+
+Media: 8 files × 256 MB of random (incompressible) data
+
+| Step | wasnew | git | git (no compression) |
+|---|---:|---:|---:|
+| First snapshot | 4,348 | 71,588 | 23,543 |
+| Re-snapshot, nothing changed | 2 | 44 | 43 |
+| Reorganize (move every file into subfolders) | 11 | 11,458 | 11,732 |
+| Undo reorganize | 12 | 8,667 | 8,714 |
+| Trash 10% + undo | 9 | 2,328 | 2,351 |
+| Store size | 2,048.0 MB | 2,048.7 MB | 2,048.3 MB |
+
+Small: 5,000 files × 4 KB
+
+| Step | wasnew | git | git (no compression) |
+|---|---:|---:|---:|
+| First snapshot | 2,336 | 7,034 | 7,880 |
+| Re-snapshot, nothing changed | 151 | 57 | 53 |
+| Reorganize | 2,646 | 3,699 | 3,797 |
+| Undo reorganize | 2,572 | 2,566 | 2,647 |
+| Trash 10% + undo | 555 | 659 | 630 |
+| Store size | 21.9 MB | 20.3 MB | 20.5 MB |
+
+With large files wasnew wins because its moves and undos are renames, while git rewrites the working tree and rehashes content. It loses the unchanged re-snapshot on small files because it stats each file from Node, while git relies on its cached directory scan on Windows. Undo on small files is about even (2,572 vs 2,566 ms).
+
+```bash
+pnpm build && pnpm bench:git
+```
+
+`pnpm bench` times wasnew alone on a larger tree. Its last recorded run (Linux, Intel Xeon 2.1 GHz 4 cores, Node 22.22, 2026-10-02): snapshot of 2,626 files including one 1 GiB file in 5.4 s with 162 MB peak RSS, unchanged re-snapshot in 0.24 s, 2,625 moves in 2.9 s, undo of that batch in 2.9 s.
+
+## Token cost
+
+What an agent reads back after a large job (`pnpm bench:tokens`, 5,300 operations: 5,000 moves and 300 trashes). Tokens are characters / 4, an approximation.
+
+| Result | Characters | ~Tokens |
+|---|---:|---:|
+| `wasnew_undo`, every item listed (before summaries) | 1,578,276 | 394,569 |
+| `wasnew_undo`, summary + first 20 (now) | 6,746 | 1,687 |
+| `wasnew_move`, 5,000 moves (before) | 71 | 18 |
+| `wasnew_move`, 5,000 moves (now, with summary) | 249 | 62 |
+| `git status --porcelain`, same changes | 343,351 | 85,838 |
+
+The summary the agent reads after that undo:
+
+```text
+1,988 × *  sorted/2026/*/ → inbox/ (undone)
+1,049 × *.png  sorted/png/ → inbox/ (undone)
+1,004 × *.txt  sorted/txt/ → inbox/ (undone)
+959 × *.pdf  sorted/pdf/ → inbox/ (undone)
+300 × *.tmp  trash → inbox/ (undone)
+```
+
+## Comparison
+
+| | wasnew | git | Claude Code checkpoints | Cline checkpoints | Gemini CLI checkpointing | AgentFS |
+|---|---|---|---|---|---|---|
+| What is tracked | Moves, renames and trashes made through its tools, plus snapshots of file content | Committed content | Edits by Claude's file editing tools | Workspace state committed to a shadow git repo after each tool use | Project state before an approved tool that modifies files | Every file operation, tool call and state change |
+| Shell `rm` / `mv` | Not recorded if run directly; the example hook blocks them and points to the tools | Undone only for committed files | Not tracked | Captured at the next commit to the shadow repo | Not stated | Recorded when done inside AgentFS |
+| Where it works | Any existing folder | A git repository | The session's project | The workspace | The project | Inside the AgentFS filesystem (SDK, FUSE or NFS mount) |
+| Storage | `.wasnew/` in the folder | `.git/` | Session snapshots, deleted about 30 days after last use by default | Shadow git repo, separate from project git | Shadow git repo under `~/.gemini/history/` | One SQLite database file |
+
+Notes from each project's docs: Claude Code does not capture external changes or edits from other concurrent sessions. Cline notes that checkpoints may use significant storage on very large repositories and can slow it down. Gemini CLI checkpointing is off by default. wasnew records the agent, model and reason with each operation. git finds renames by similarity heuristics and does not attribute uncommitted changes to an agent.
+
+Sources: [Claude Code checkpointing](https://code.claude.com/docs/en/checkpointing) · [Cline checkpoints](https://docs.cline.bot/features/checkpoints) · [Gemini CLI checkpointing](https://geminicli.com/docs/cli/checkpointing/) · [AgentFS](https://github.com/tursodatabase/agentfs)
 
 ## CLI
 
 ```bash
-wasnew snapshot -m "정리 전"  # --if-changed 면 같은 상태는 다시 안 남김
-wasnew watch                  # 폴더가 바뀔 때마다 스냅샷 (wasnew 를 안 쓰는 프로그램용 안전망)
+wasnew snapshot -m "before cleanup"   # --if-changed skips it when nothing changed
+wasnew watch                  # snapshot whenever the folder changes (safety net for other programs)
 wasnew log
-wasnew diff <id>              # 지금과 비교, 두 번째 id 를 주면 스냅샷끼리
+wasnew diff <id>              # against now; a second id compares two snapshots
 wasnew pending --batch agent-1
-wasnew undo --batch agent-1   # -n 3 이면 마지막 3개만
+wasnew undo --batch agent-1   # -n 3 undoes only the last 3
 wasnew restore <id> docs/a.md
-wasnew plans · show <id> · approve <id> · apply <id>
+wasnew plans                  # also: show <id>, approve <id>, apply <id>
 wasnew history <path>
-wasnew where <path>           # 옛 경로의 파일이 지금 어디 있는지
-wasnew recover                # 죽은 프로세스가 남긴 반쯤 기록된 조작 정리
+wasnew where <path>           # where the file at an old path is now
+wasnew recover                # settle operations a crashed process left half-recorded
 wasnew policy
-wasnew gc --keep-last 20      # 저장소 정리, 미리보기 · --apply 로 실행
-wasnew empty-trash --older-than-days 30   # 진짜 삭제, 미리보기 · --apply 로 실행
+wasnew gc --keep-last 20      # prune the store; dry run unless --apply
+wasnew empty-trash --older-than-days 30   # really delete; dry run unless --apply
 ```
 
-모든 명령에 `--root <폴더>`(기본 현재 폴더) · `--json`.
+Every command takes `--root <dir>` (default: current folder) and `--json`.
 
-## 라이브러리
+## Library
 
 ```ts
 import { openVault, isWasnewError } from "wasnew";
 
 const vault = await openVault("C:/Users/me/Downloads");
-const by = { agent: "my-agent", reason: "정리" };
-const before = await vault.snapshot({ label: "정리 전" });
-await vault.move("스크린샷 (3).png", "Pictures/2026/스크린샷 (3).png", "run-42", by);
-await vault.trash("임시.tmp", "run-42", by);
+const by = { agent: "my-agent", reason: "cleanup" };
+const before = await vault.snapshot({ label: "before cleanup" });
+await vault.move("Screenshot (3).png", "Pictures/2026/Screenshot (3).png", "run-42", by);
+await vault.trash("temp.tmp", "run-42", by);
 const { undone, skipped } = await vault.undo({ batch: "run-42" });
-const { guard } = await vault.restore(before.id);   // guard 로 복원도 되돌린다
+const { guard } = await vault.restore(before.id);   // guard undoes the restore too
 
 const plan = await vault.plan([{ op: "move", from: "a.pdf", to: "Docs/a.pdf" }], { by });
 if (!plan.issues.length) await vault.apply(plan.id);
 await vault.history("Docs/a.pdf");
 ```
 
-## 원칙
+## Principles
 
-- **사용자 파일을 지우지 않는다.** 지우기는 휴지통으로 옮기기이고, 복원은 덮어쓸 내용을 먼저 저장한다. 진짜 삭제는 사람이 부르는 `emptyTrash` 하나뿐이고 MCP 에는 없다
-- **이동은 저널로.** 볼륨을 넘은 이동도 복사 → 대조 → 원본 삭제로 하고 되돌린다
-- **기록 전에 죽어도 잃지 않는다.** 조작마다 `inflight` 표식을 먼저 쓰고, 저널에 쓴 뒤 지운다. `recover` 가 남은 표식을 디스크 상태로 판정해 저널에 올린다
-- **같은 내용은 한 번만 저장** (sha256 내용주소). 큰 파일은 흘려 보내며 해시한다
-- **안 바뀐 파일은 다시 읽지 않는다.** 크기 · 수정 시각이 지난 스냅샷과 같으면 그 해시를 쓴다. 스냅샷 직전 2초 안에 수정된 파일은 믿지 않고 다음에 다시 읽는다 (git 의 racy 규칙)
-- **저널은 한 번에 한 작성자.** 잠금 파일로 여러 프로세스가 같은 번호를 내지 않게 한다
-- **저장소 정리는 명시적으로만.** `gc` 는 기준이 있어야 돌고, 기본이 미리보기이며, 가장 최근 스냅샷은 늘 남긴다
+- User files are not deleted. Delete means move to trash, and restore saves what it overwrites first. Files are really deleted only by `emptyTrash`, which a person calls and which is not in MCP.
+- Moves are journaled. A move across volumes is copy, compare, then remove the original, and it can be undone.
+- A crash before the journal write loses nothing. Each operation writes an `inflight` marker first and removes it after the journal entry. `recover` settles leftover markers from what is on disk.
+- Same content is stored once (sha256 content addressing). Large files are hashed as a stream.
+- Unchanged files are not read again. If size and mtime match the last snapshot, its hash is reused. Files modified within 2 seconds before a snapshot are not trusted and are read next time (git's racy rule).
+- One journal writer at a time. A lock file keeps processes from issuing the same sequence number.
+- The store is pruned only when asked. `gc` needs a criterion, defaults to a dry run, and always keeps the newest snapshot.
 
-## 저장 구조
+## Storage layout
 
 ```
 <root>/.wasnew/
-  objects/<aa>/<나머지 62자>   내용주소 blob
-  snapshots/<id>.json         스냅샷 manifest (partial: 복원 전 guard 처럼 일부만 담은 것)
-  journal.jsonl               이동 · 휴지통 · 되돌림 · 복원 · 계획 · 승인 · 앱 이벤트 (append-only)
-  trash/<id>/<path>           휴지통
-  plans/<id>.json             계획
-  inflight/<id>.json          진행 중인 조작 (정상이면 비어 있다)
-  policy.json                 정책
-  statcache.json              크기 · 수정 시각 → 해시 캐시
-<root>/.wasnewignore          gitignore 문법, 스냅샷에서 뺄 것
+  objects/<aa>/<other 62 chars>   content-addressed blobs
+  snapshots/<id>.json             snapshot manifests (partial: e.g. the guard before a restore)
+  journal.jsonl                   moves, trashes, undos, restores, plans, approvals, app events (append-only)
+  trash/<id>/<path>               trash
+  plans/<id>.json                 plans
+  inflight/<id>.json              operations in progress (empty when all is well)
+  policy.json                     policy
+  statcache.json                  size + mtime → hash cache
+<root>/.wasnewignore              gitignore syntax, left out of snapshots
 ```
 
-에러 코드: `DEST_EXISTS` · `OUTSIDE_ROOT` · `IN_STORE` · `NOT_FOUND` · `CROSS_DEVICE_DIR` · `COPY_MISMATCH` · `SNAPSHOT_NOT_FOUND` · `NOT_IN_SNAPSHOT` · `BAD_SNAPSHOT_ID` · `POLICY_INVALID` · `POLICY_PROTECTED` · `POLICY_LIMIT` · `POLICY_DENIED` · `NEEDS_APPROVAL` · `PLAN_NOT_FOUND` · `PLAN_INVALID` · `PLAN_APPLIED` · `RESERVED_OP` · `LOCKED` · `GC_NEEDS_POLICY`.
+Error codes: `DEST_EXISTS`, `OUTSIDE_ROOT`, `IN_STORE`, `NOT_FOUND`, `CROSS_DEVICE_DIR`, `COPY_MISMATCH`, `SNAPSHOT_NOT_FOUND`, `NOT_IN_SNAPSHOT`, `BAD_SNAPSHOT_ID`, `POLICY_INVALID`, `POLICY_PROTECTED`, `POLICY_LIMIT`, `POLICY_DENIED`, `NEEDS_APPROVAL`, `PLAN_NOT_FOUND`, `PLAN_INVALID`, `PLAN_APPLIED`, `RESERVED_OP`, `LOCKED`, `GC_NEEDS_POLICY`.
 
-## 개발
+## Development
 
 ```bash
-pnpm test        # 78개: 스냅샷 · stat 캐시 · watch · 복원 guard · 볼륨 간 이동 · 잠금 · 휴지통 · 출처 · 정책 · 계획/승인 · 복구 · MCP 왕복 · 훅
+pnpm test        # 114 tests: snapshots, stat cache, watch, restore guard, cross-volume moves, locks, trash, provenance, policy, plan/approve, recovery, MCP round trips, hooks, summaries
 pnpm typecheck
-pnpm build       # dist/ 에 CLI 와 MCP 서버
-pnpm bench
+pnpm build       # CLI and MCP server into dist/
+pnpm bench       # also bench:git, bench:tokens
 ```
 
-wasnew 는 ISNEW 앱의 파일 정리 엔진이 쓰는 되돌리기 계층으로 처음 만들어졌습니다.
+wasnew started as the undo layer under the file organizing engine of the ISNEW app.
 
-## 제한
+## Limits
 
-- MCP 는 실제 stdio 왕복과 테스트로 검증했습니다. Claude Desktop · Claude Code 클라이언트에 붙여서는 아직 돌려 보지 않았습니다
-- 테스트는 CI 에서 ubuntu · windows · macOS × Node 20 · 22 로 돕니다. 실측 숫자는 Linux 한 대에서만 쟀습니다
-- 정책 파일은 wasnew 도구로는 못 고치지만, 에이전트가 다른 편집 도구로 고치는 것까지 막지는 않습니다
-- `maxOpsPerBatch` 는 batch 를 단 조작만 셉니다
-- 볼륨을 넘어 폴더를 통째로 옮기지 못합니다(`CROSS_DEVICE_DIR`). 파일 단위로 옮겨 주세요
-- 지금과 비교하는 `diff` 는 모든 파일을 해시합니다
-- 내용을 바꾸면서 크기와 수정 시각까지 되돌려 놓는 프로그램은 캐시를 속일 수 있습니다. 그럴 땐 `snapshot --rehash`를 쓰세요
-- `watch` 는 Node 의 재귀 감시(`fs.watch`)를 씁니다. 네트워크 드라이브에서는 변경 알림이 오지 않을 수 있습니다
+- MCP is tested with real stdio round trips. It has not yet been run attached to the Claude Desktop or Claude Code clients.
+- CI runs the tests on Ubuntu, Windows and macOS with Node 20 and 22. Benchmarks come from single machines, listed with each table.
+- The policy file can't be changed through wasnew tools, but nothing stops an agent from editing it with another tool.
+- `maxOpsPerBatch` counts only operations that carry a batch.
+- A whole folder can't be moved across volumes (`CROSS_DEVICE_DIR`). Move its files one by one.
+- `diff` against the current files hashes every file.
+- A program that changes content and then sets size and mtime back can fool the cache. Use `snapshot --rehash` then.
+- `watch` uses Node's recursive `fs.watch`. Network drives may not send change events.
 
-코드는 MIT. 이름과 로고는 라이선스에 포함되지 않아요([NOTICE](NOTICE)).
+## FAQ
+
+### Can Claude Code undo rm or mv?
+
+Not through checkpoints: the docs say files changed by Bash commands such as `rm`, `mv` and `cp` are not tracked. With wasnew the agent uses `wasnew_trash` and `wasnew_move` instead, and the [hook example](examples/claude-code/) blocks the shell versions.
+
+### How do I undo files an AI agent deleted?
+
+If the agent used `wasnew_trash`, run `wasnew undo --batch <batch>` (or ask the agent to call `wasnew_undo`). If something deleted files outside wasnew and a snapshot exists, `wasnew restore <snapshot>` brings back their content. See [CLI](#cli).
+
+### Does it need git?
+
+No. It works in any folder and keeps its data in `.wasnew/` inside that folder. It also works inside a git repository, alongside git.
+
+### How is this different from Claude Code checkpoints?
+
+Checkpoints cover edits made by Claude's file editing tools within a session. wasnew covers moves, renames and deletes in any folder, records which agent did each one and why, and keeps the journal in the folder across sessions. See [Comparison](#comparison).
+
+### How do I stop an agent from running rm -rf?
+
+In Claude Code, add the `PreToolUse` hook from [examples/claude-code](examples/claude-code/). It blocks `rm`, `mv`, `del`, `Remove-Item`, `git clean`, `git reset --hard` and `find -delete` and tells the agent to use the wasnew tools. It matches command text, so a script that deletes files on its own is not caught; keep the snapshot hook or `wasnew watch` running as a backstop.
+
+### Can an agent approve its own plan?
+
+No. There is no approve tool in MCP. A person runs `wasnew approve <id>` in a terminal, and `wasnew_apply` refuses with `NEEDS_APPROVAL` until then. See [Plan → approve → apply](#plan--approve--apply).
+
+### Does it work with Codex, Gemini CLI or Cursor?
+
+Any MCP client can use the 13 tools; run `wasnew mcp --root <folder>` as a stdio server in that client's MCP settings. The shell-blocking and moved-file hooks are written for Claude Code's hook format.
+
+### How much disk does it use?
+
+The first snapshot stores one copy of every file's content, about the size of the folder (2,048 MB for 2 GB of media in the [benchmark](#benchmarks)). Later snapshots add only new content, and moves and trash are renames that add nothing. `wasnew gc` and `wasnew empty-trash` free space.
+
+### What happens if the process crashes mid-move?
+
+Each operation writes an `inflight` marker before touching files and removes it after the journal entry. `wasnew recover` reads leftover markers, checks the disk, and records what actually happened, so the move can still be undone.
+
+### Where does an agent find a file that was moved?
+
+`wasnew_where` follows the journal to the current path, and failed calls on a missing path include `movedTo`. In Claude Code, the moved-file hook stops `Read` and `Edit` on a gone path and gives the new one.
+
+## License
+
+Code is MIT. The name and logo are not covered by the license ([NOTICE](NOTICE)).

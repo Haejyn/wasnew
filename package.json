@@ -1,13 +1,26 @@
 {
   "name": "wasnew",
   "version": "0.3.0",
-  "description": "Undo what AI agents move and delete, per task. Works outside git too.",
+  "description": "Undo layer for AI agents' file operations: journals every move, rename and delete in any folder and undoes them per task, with or without git.",
   "private": true,
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "author": "Haejyn",
+  "homepage": "https://github.com/Haejyn/wasnew#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Haejyn/wasnew.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Haejyn/wasnew/issues"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "bin": {
     "wasnew": "./bin/wasnew.js"
@@ -15,11 +28,12 @@
   "files": [
     "bin",
     "dist",
-    "src",
-    "!src/**/*.test.ts",
     "README.md",
+    "README.ko.md",
     "LICENSE",
     "NOTICE",
+    "CITATION.cff",
+    "llms.txt",
     "assets",
     "examples"
   ],
@@ -27,12 +41,19 @@
     "node": ">=20"
   },
   "keywords": [
-    "undo",
-    "snapshot",
-    "mcp",
     "ai-agent",
-    "safety",
+    "undo",
+    "mcp",
+    "mcp-server",
+    "claude-code",
+    "rollback",
+    "checkpoint",
+    "trash",
+    "safe-delete",
+    "file-operations",
     "journal",
+    "snapshot",
+    "agent-safety",
     "backup"
   ],
   "license": "MIT",
@@ -42,7 +63,8 @@
     "test": "vitest run",
     "bench": "node scripts/bench.mjs",
     "bench:git": "node scripts/bench-git.mjs",
-    "bench:tokens": "node scripts/bench-tokens.mjs"
+    "bench:tokens": "node scripts/bench-tokens.mjs",
+    "prepack": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

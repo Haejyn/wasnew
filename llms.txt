@@ -1,0 +1,39 @@
+# wasnew
+
+> wasnew is an undo layer for AI agents' file operations: it journals every move, rename and delete an agent makes in any folder, and undoes them per task, with or without git.
+
+wasnew runs as an MCP server (13 tools), a CLI and a TypeScript library. Node 20 or newer, zero runtime dependencies, MIT license. It keeps its data in a `.wasnew/` folder inside the folder it protects: content-addressed snapshots, an append-only journal, a trash folder, plans and a policy file.
+
+Agents call `wasnew_move` and `wasnew_trash` instead of shell `mv` and `rm`. Each operation is recorded with the agent, model, reason and a batch id, and `wasnew undo --batch <id>` undoes a whole task. Delete means move to trash; only a person can empty it. Large changes can be required to go through plan → approve → apply, and there is no approve tool in MCP, so an agent cannot approve its own plan.
+
+It fills a gap left by Claude Code checkpoints, whose docs say "Checkpointing does not track files modified by Bash commands" (rm, mv, cp), and by git, which covers only committed files in a repository.
+
+Not yet published to npm; install from source with `pnpm install && pnpm build`, then `claude mcp add --transport stdio wasnew -- node /path/to/wasnew/bin/wasnew.js mcp --root <folder>`.
+
+## Docs
+
+- [README](https://github.com/Haejyn/wasnew/blob/main/README.md): definition, quick start, MCP tools, policy, CLI, library, limits
+- [MCP tools](https://github.com/Haejyn/wasnew/blob/main/README.md#mcp-tools): the 13 tools and how large results are summarized
+- [Plan → approve → apply](https://github.com/Haejyn/wasnew/blob/main/README.md#plan--approve--apply): approval flow for large changes
+- [Benchmarks](https://github.com/Haejyn/wasnew/blob/main/README.md#benchmarks): wasnew vs git timings and store size, including the case wasnew loses
+- [Token cost](https://github.com/Haejyn/wasnew/blob/main/README.md#token-cost): characters and tokens an agent reads after a 5,300-operation job
+- [Comparison](https://github.com/Haejyn/wasnew/blob/main/README.md#comparison): wasnew vs git, Claude Code checkpoints, Cline, Gemini CLI and AgentFS, with sources
+- [FAQ](https://github.com/Haejyn/wasnew/blob/main/README.md#faq): undoing rm/mv, git, approval, other MCP clients, disk use, crash recovery
+- [Korean README](https://github.com/Haejyn/wasnew/blob/main/README.ko.md)
+
+## Examples
+
+- [Claude Code setup](https://github.com/Haejyn/wasnew/blob/main/examples/claude-code/README.md): MCP server plus hooks that snapshot on each prompt, block shell rm/mv, and redirect reads of moved files
+- [settings.json](https://github.com/Haejyn/wasnew/blob/main/examples/claude-code/settings.json): hook configuration
+- [guard.mjs](https://github.com/Haejyn/wasnew/blob/main/examples/claude-code/guard.mjs): PreToolUse hook that blocks delete and move commands
+
+## Source
+
+- [src/mcp.ts](https://github.com/Haejyn/wasnew/blob/main/src/mcp.ts): MCP server and tool definitions
+- [src/index.ts](https://github.com/Haejyn/wasnew/blob/main/src/index.ts): library (openVault, snapshot, move, trash, undo, restore, plan, apply)
+- [src/cli.ts](https://github.com/Haejyn/wasnew/blob/main/src/cli.ts): CLI commands
+
+## Optional
+
+- [LICENSE](https://github.com/Haejyn/wasnew/blob/main/LICENSE): MIT
+- [CITATION.cff](https://github.com/Haejyn/wasnew/blob/main/CITATION.cff)

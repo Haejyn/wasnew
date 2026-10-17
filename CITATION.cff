@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "wasnew"
+abstract: "An undo layer for AI agents' file operations: it journals every move, rename and delete an agent makes in any folder, and undoes them per task, with or without git."
+authors:
+  - alias: "Haejyn"
+repository-code: "https://github.com/Haejyn/wasnew"
+url: "https://github.com/Haejyn/wasnew"
+license: MIT
+version: "0.3.0"
+keywords:
+  - ai-agent
+  - undo
+  - mcp
+  - claude-code
