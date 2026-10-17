@@ -146,6 +146,8 @@ describe("concurrent snapshots", () => {
     const [v1, v2] = await Promise.all([openVault(root), openVault(root)]);
     const [s1, s2] = await Promise.all([v1.snapshot(), v2.snapshot()]);
     expect(await fs.readdir(path.join(root, ".wasnew", "tmp"))).toEqual([]);
+    // both write statcache.json at the end; the loser's temp file must not stay behind
+    expect((await fs.readdir(path.join(root, ".wasnew"))).filter((n) => n.startsWith("statcache.json."))).toEqual([]);
     for (const snap of [s1, s2]) {
       expect(snap.fileCount).toBe(42);
       for (const f of (await v1.get(snap.id)).files) expect((await v1.readSnapshotFile(snap.id, f.path)).toString()).toBe(await read(f.path));

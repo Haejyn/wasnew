@@ -417,6 +417,32 @@ export class Vault {
   }
 
   /**
+   * Replaces statcache.json through a temp file. Windows refuses to rename onto a file another
+   * process has open or is replacing (EPERM, EACCES, EBUSY), which happens when two snapshots end
+   * together, so it retries briefly. If it still cannot, the cache is skipped: it only saves
+   * rehashing, and the file there belongs to the other snapshot and is valid on its own. The temp
+   * file never stays behind.
+   */
+  private async writeStatCache(cache: StatCache): Promise<void> {
+    const tmp = this.statCachePath + "." + randomBytes(4).toString("hex");
+    try {
+      await fs.writeFile(tmp, JSON.stringify(cache), "utf8");
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await fs.rename(tmp, this.statCachePath);
+          return;
+        } catch (e: any) {
+          if (!["EPERM", "EACCES", "EBUSY"].includes(e?.code)) throw e;
+          if (attempt >= 5) return;
+          await new Promise((r) => setTimeout(r, 10 * 2 ** attempt));
+        }
+      }
+    } finally {
+      await fs.rm(tmp, { force: true });
+    }
+  }
+
+  /**
    * The cache's hashes all come from its snapshot's manifest. While that manifest exists its blobs
    * are live for gc (and gc also keeps every blob the cache names), so a cache hit needs no check
    * that its blob is there. Without the manifest each hit checks its blob.
@@ -466,9 +492,7 @@ export class Vault {
         const st = stats.get(f.path)!;
         if (st.mtimeMs < trustBefore) cache.files[f.path] = [st.size, st.mtimeMs, f.hash];
       }
-      const tmp = this.statCachePath + "." + randomBytes(4).toString("hex");
-      await fs.writeFile(tmp, JSON.stringify(cache), "utf8");
-      await fs.rename(tmp, this.statCachePath);
+      await this.writeStatCache(cache);
     }
     return { id: snap.id, label, created, fileCount: files.length, newBlobs, hashed, ...(partial ? { partial: true } : {}) };
   }
