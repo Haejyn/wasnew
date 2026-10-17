@@ -39,7 +39,7 @@ describe("mcp server", () => {
       { jsonrpc: "2.0", id: 3, method: "nope" },
     ]);
     expect(init.result).toMatchObject({ protocolVersion: "2025-03-26", serverInfo: { name: "wasnew" }, capabilities: { tools: {} } });
-    expect(list.result.tools.map((t: any) => t.name)).toEqual(["wasnew_snapshot", "wasnew_log", "wasnew_diff", "wasnew_move", "wasnew_trash", "wasnew_plan", "wasnew_apply", "wasnew_history", "wasnew_where", "wasnew_pending", "wasnew_undo", "wasnew_restore", "wasnew_read"]);
+    expect(list.result.tools.map((t: any) => t.name)).toEqual(["wasnew_snapshot", "wasnew_log", "wasnew_diff", "wasnew_move", "wasnew_trash", "wasnew_plan", "wasnew_apply", "wasnew_history", "wasnew_where", "wasnew_pending", "wasnew_undo", "wasnew_redo", "wasnew_restore", "wasnew_read", "wasnew_lessons", "wasnew_agents"]);
     expect(list.result.tools.every((t: any) => t.inputSchema.type === "object" && !("run" in t))).toBe(true);
     expect(rest).toEqual([{ jsonrpc: "2.0", id: 3, error: { code: -32601, message: "method not found: nope" } }]);
   });

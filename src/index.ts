@@ -28,7 +28,7 @@ import { PolicyFile, type LoadedPolicy } from "./policy.js";
 
 export { WasnewError, isWasnewError, type WasnewErrorCode } from "./errors.js";
 export { wasnewIgnored, parseIgnore, ignoredBy } from "./ignore.js";
-export { parsePolicy, type Policy, type LoadedPolicy } from "./policy.js";
+export { parsePolicy, type Policy, type LoadedPolicy, type TrustPolicy } from "./policy.js";
 export { summarizeOps, type SummaryOp, type OpSummary } from "./summary.js";
 
 const STORE_DIR = ".wasnew";
@@ -47,6 +47,9 @@ const GROUP_SIZE = 256;
 const SMALL_FILE_MAX = 4 * 1024 ** 2;
 /** Files a snapshot works on at the same time (stat, hash, store) */
 const CAPTURE_CONCURRENCY = 16;
+/** A pattern counts as fine to keep doing only after it stood this long without an undo */
+const CONFIRMED_AFTER_MS = 86_400_000;
+const REASON_MAX = 60;
 /** Same order as String#localeCompare with no arguments, without building a collator per call */
 const byLocale = new Intl.Collator().compare;
 
@@ -73,9 +76,12 @@ export interface Snapshot extends SnapshotMeta {
 export interface Actor { agent?: string; model?: string; reason?: string; session?: string }
 
 /** `batch` groups one task so undo can roll it back as a unit instead of counting moves */
-interface JournalMove { seq: number; op: "move"; from: string; to: string; at: string; batch?: string; by?: Actor }
-/** `to` is relative to the store: trash/<id>/<path> */
-interface JournalTrash { seq: number; op: "trash"; from: string; to: string; at: string; batch?: string; by?: Actor }
+interface JournalMove { seq: number; op: "move"; from: string; to: string; at: string; batch?: string; by?: Actor; redoOf?: number; dir?: true }
+/**
+ * `to` is relative to the store: trash/<id>/<path>. `redoOf`: the undone op this one re-applies.
+ * `dir`: what moved was a folder (always set for trash, for a move only when the name has no extension).
+ */
+interface JournalTrash { seq: number; op: "trash"; from: string; to: string; at: string; batch?: string; by?: Actor; redoOf?: number; dir?: true }
 interface JournalUndo { seq: number; op: "undo"; of: number; at: string; by?: Actor }
 interface JournalRestore { seq: number; op: "restore"; snapshot: string; paths: string[]; at: string; guard?: string; by?: Actor }
 interface JournalNote { seq: number; op: string; at: string; [key: string]: unknown }
@@ -86,6 +92,35 @@ const RESERVED_OPS = new Set(["move", "trash", "undo", "restore", "purge", "plan
 export interface MoveRecord { from: string; to: string; at: string; batch?: string; trashed?: true; by?: Actor }
 export interface UndoSkip extends MoveRecord { reason: string; message: string }
 export interface UndoResult { undone: MoveRecord[]; skipped: UndoSkip[] }
+/** `redone`: the new ops, so `to` of a trash is its new place in the trash */
+export interface RedoResult { redone: MoveRecord[]; skipped: UndoSkip[] }
+/**
+ * One kind of operation as the journal saw it: op, file type, source folder, destination folder.
+ * `avoid`: undone at least minUndone times and in at least half the cases. `ok`: done at least 5
+ * times over more than a day and never undone. A redo that stayed brings its op back to kept.
+ */
+export interface Lesson {
+  kind: "avoid" | "ok";
+  op: "move" | "trash";
+  /** lower-case extension without the dot, "folder", or "" for a file without one */
+  ext: string;
+  fromDir: string;
+  /** destination folder, or "trash" */
+  toDir: string;
+  total: number;
+  undone: number;
+  kept: number;
+  agents: string[];
+  /** reasons given for the latest undone ops, newest first, at most 2 */
+  reasons: string[];
+  first: string;
+  last: string;
+  line: string;
+}
+export interface Lessons { avoid: Lesson[]; ok: Lesson[] }
+/** An avoid lesson that matches `matches` operations of a list being proposed */
+export interface PlanLesson extends Lesson { matches: number }
+export interface AgentRecord { agent: string; ops: number; undone: number; undoRate: number; firstSeen: string; lastSeen: string }
 export interface RestoreResult { restored: number; skipped: number; guard?: string }
 export interface Diff { added: string[]; changed: string[]; missing: string[]; moved: { from: string; to: string }[] }
 export interface SnapshotResult extends SnapshotMeta {
@@ -153,6 +188,9 @@ type JournalLine = { op: string; at: string; [key: string]: unknown };
 interface InflightItem { src: string; dst: string; entry: Record<string, unknown> & { op: string }; looksDone?: boolean }
 interface PerformItem extends InflightItem { kind: "move" | "trash"; caseOnly: boolean; rel: string; storeTo?: string }
 interface UndoItem extends InflightItem { m: Movement; caseOnly: boolean }
+interface RedoItem extends InflightItem { m: Movement; caseOnly: boolean; storeTo?: string }
+interface PatternShape { key: string; op: "move" | "trash"; ext: string; fromDir: string; toDir: string }
+interface Pattern extends PatternShape { total: number; undone: number; agents: Set<string>; reasons: string[]; first: string; last: string }
 interface GroupOutcome { done: number[]; errors: { i: number; error: unknown }[]; journalError?: unknown }
 /** Per capture: folders already made (so a blob costs no mkdir) and hashes some file of it is storing */
 interface StoreCtx { made: Set<string>; claimed: Set<string> }
@@ -771,7 +809,7 @@ export class Vault {
       await fs.appendFile(this.journalPath, text, "utf8");
       this.seenBytes += Buffer.byteLength(text);
       this.lastSeq = first + entries.length - 1;
-      for (const e of entries) if ((e.op === "move" || e.op === "trash") && typeof e.batch === "string") this.countOp(e.batch);
+      for (const e of entries) if ((e.op === "move" || e.op === "trash") && typeof e.batch === "string" && e.redoOf === undefined) this.countOp(e.batch);
       return first;
     });
   }
@@ -923,7 +961,8 @@ export class Vault {
       const counts = new Map<string, number>();
       for (const e of await this.readJournal()) {
         const b = (e as Movement).batch;
-        if ((e.op === "move" || e.op === "trash") && typeof b === "string") counts.set(b, (counts.get(b) ?? 0) + 1);
+        // a redo takes the place of an op the batch already counted
+        if ((e.op === "move" || e.op === "trash") && typeof b === "string" && (e as Movement).redoOf === undefined) counts.set(b, (counts.get(b) ?? 0) + 1);
       }
       this.batchCounts = counts;
     }
@@ -949,13 +988,13 @@ export class Vault {
     }
   }
 
-  /** `pending`: ops of this batch already done in the current group but not yet journaled */
-  private async checkPolicy(p: LoadedPolicy, op: "move" | "trash", fromAbs: string, toAbs: string | null, batch: string | undefined, pending: number): Promise<void> {
+  /** `pending`: ops of this batch already done in the current group but not yet journaled; null skips the batch limit (redo) */
+  private async checkPolicy(p: LoadedPolicy, op: "move" | "trash", fromAbs: string, toAbs: string | null, batch: string | undefined, pending: number | null): Promise<void> {
     await this.assertUnprotected(p, fromAbs);
     if (toAbs) await this.assertUnprotected(p, toAbs);
     if (op === "trash" && p.policy.allowTrash === false) throw new WasnewError("POLICY_DENIED", "trash is turned off by policy");
     const max = p.policy.maxOpsPerBatch;
-    if (batch !== undefined && max !== undefined && (await this.opsInBatch(batch)) + pending >= max) {
+    if (pending !== null && batch !== undefined && max !== undefined && (await this.opsInBatch(batch)) + pending >= max) {
       throw new WasnewError("POLICY_LIMIT", `batch ${batch} reached the policy limit of ${max} operations`);
     }
   }
@@ -1039,8 +1078,12 @@ export class Vault {
       const out = await this.group(items, async (item) => {
         if (item.kind === "move") {
           if (!item.caseOnly && (await exists(item.dst))) throw new WasnewError("DEST_EXISTS", "destination already exists: " + item.rel, item.rel);
-        } else if (!(await exists(item.src))) {
-          throw new WasnewError("NOT_FOUND", "no such file: " + item.rel, item.rel);
+          // lessons tell folders from files without an extension; only those names cost a stat
+          if (!hasExt(item.src) && (await fs.stat(item.src).then((st) => st.isDirectory(), () => false))) item.entry.dir = true;
+        } else {
+          const st = await fs.stat(item.src).catch(() => null);
+          if (!st) throw new WasnewError("NOT_FOUND", "no such file: " + item.rel, item.rel);
+          if (st.isDirectory()) item.entry.dir = true;
         }
         policy ??= await this.policy();   // once per group, read when the first op gets this far
         await this.checkPolicy(policy, item.kind, item.src, item.kind === "move" ? item.dst : null, batch, pending);
@@ -1196,6 +1239,79 @@ export class Vault {
     return (await this.undo({ count })).undone;
   }
 
+  /**
+   * Re-applies undone moves and trashes: those of one `batch`, or the last `count` undone overall,
+   * most recently undone first (the reverse of how undo took them back, so a chain replays in its
+   * first order). Each one is journaled as a new move or trash with `redoOf`, through the same
+   * group commit as any move, so a crash is settled by recover() and `undo` can take the redo back.
+   * The original op stays undone. Never overwrites: a taken destination or a missing source is
+   * skipped and reported, as in undo. Protected paths and allowTrash still apply; maxOpsPerBatch
+   * does not, since the batch already counted the op.
+   */
+  async redo(opts: { batch?: string; count?: number; by?: Actor } = {}): Promise<RedoResult> {
+    const entries = await this.readJournal();
+    const undoneBy = new Map<number, number>();
+    const redone = new Set<number>();
+    for (const e of entries) {
+      if (e.op === "undo") undoneBy.set((e as JournalUndo).of, e.seq);
+      else if ((e.op === "move" || e.op === "trash") && typeof (e as Movement).redoOf === "number") redone.add((e as Movement).redoOf!);
+    }
+    const candidates = entries
+      .filter((e): e is Movement => (e.op === "move" || e.op === "trash") && undoneBy.has(e.seq) && !redone.has(e.seq))
+      .filter((m) => opts.batch === undefined || m.batch === opts.batch)
+      .sort((a, b) => undoneBy.get(a.seq)! - undoneBy.get(b.seq)!);
+    const count = opts.count && opts.count > 0 ? opts.count : opts.batch ? Infinity : 1;
+    const targets = candidates.slice(-count).reverse();
+    const out: RedoResult = { redone: [], skipped: [] };
+    const made = new Set<string>();
+    const why = (e: any, fallback: string) => ({ reason: e?.code ?? fallback, message: String(e?.message ?? e) });
+    const missing = (item: RedoItem) => ({ code: "MISSING", message: "the file is no longer at " + item.m.from });
+    for (let start = 0; start < targets.length; start += GROUP_SIZE) {
+      const chunk = targets.slice(start, start + GROUP_SIZE);
+      const items: RedoItem[] = [];
+      const skips = new Map<Movement, { reason: string; message: string }>();
+      const trashIds = new TrashIds();
+      for (const m of chunk) {
+        try {
+          const by = opts.by ?? m.by;
+          const tail = { ...(m.batch ? { batch: m.batch } : {}), ...(by ? { by } : {}), redoOf: m.seq, ...(m.dir ? { dir: true } : {}) };
+          if (m.op === "move") {
+            const src = this.resolveSource(m.from), dst = this.resolveInside(m.to);
+            const caseOnly = src !== dst && src.toLowerCase() === dst.toLowerCase();
+            items.push({ m, src, dst, caseOnly, entry: { op: "move", from: m.from, to: m.to, ...tail } });
+          } else {
+            const src = this.resolveInside(m.from);
+            const from = toPosix(path.relative(this.root, src));
+            const to = `trash/${trashIds.for(from)}/${from}`;
+            items.push({ m, src, dst: path.join(this.store, to), caseOnly: false, storeTo: to, entry: { op: "trash", from, to, ...tail } });
+          }
+        } catch (e) {
+          skips.set(m, why(e, "INVALID"));
+        }
+      }
+      let policy: LoadedPolicy | undefined;
+      const result = await this.group(items, async (item) => {
+        if (item.m.op === "move" && !item.caseOnly && (await exists(item.dst))) throw { code: "DEST_EXISTS", message: "something now exists at the destination: " + item.m.to };
+        // a trash or case-only move checks its source here; otherwise a missing source fails the rename with ENOENT
+        if ((item.caseOnly || item.m.op === "trash") && !(await exists(item.src))) throw missing(item);
+        policy ??= await this.policy();
+        await this.checkPolicy(policy, item.m.op, item.src, item.m.op === "move" ? item.dst : null, item.m.batch, null);
+        return true;
+      }, true, made);
+      for (const { i, error } of result.errors) skips.set(items[i].m, why((error as any)?.code === "ENOENT" ? missing(items[i]) : error, "ERROR"));
+      const journaled = result.journalError === undefined ? result.done : [];
+      if (result.journalError !== undefined) for (const i of result.done) skips.set(items[i].m, why(result.journalError, "ERROR"));
+      const at = new Date().toISOString();
+      const ok = new Map(journaled.map((i) => [items[i].m, items[i]]));
+      for (const m of chunk) {
+        const item = ok.get(m);
+        if (item) out.redone.push({ ...record(m), at, ...(item.storeTo ? { to: item.storeTo } : {}), ...(item.entry.by ? { by: item.entry.by as Actor } : {}) });
+        else out.skipped.push({ ...record(m), ...skips.get(m)! });
+      }
+    }
+    return out;
+  }
+
   /** Removes now-empty folders up toward `stopAt` — best effort; only empty folders can go */
   private async pruneEmptyDirs(dirAbs: string, stopAt = this.root): Promise<void> {
     let cur = dirAbs;
@@ -1259,7 +1375,7 @@ export class Vault {
   /** Proposes operations without touching anything. Save the id: `apply` runs exactly these. */
   async plan(ops: PlanOp[], opts: { by?: Actor } = {}): Promise<Plan> {
     const issues = await this.check(ops);
-    const limit = (await this.policy()).policy.requireApprovalOver;
+    const limit = await this.approvalLimit(opts.by?.agent);
     const created = new Date().toISOString();
     const id = createHash("sha256").update(JSON.stringify(ops) + created + randomBytes(8).toString("hex")).digest("hex").slice(0, 16);
     const plan: Plan = { id, created, ops, issues, needsApproval: limit !== undefined && ops.length > limit, ...(opts.by ? { by: opts.by } : {}) };
@@ -1303,7 +1419,7 @@ export class Vault {
     const plan = await this.getPlan(id);
     if (plan.applied) throw new WasnewError("PLAN_APPLIED", "plan was already applied: " + id);
     if (plan.issues.length) throw new WasnewError("PLAN_INVALID", `plan has ${plan.issues.length} issue(s); make a new plan`);
-    const limit = (await this.policy()).policy.requireApprovalOver;
+    const limit = await this.approvalLimit(plan.by?.agent);
     if (limit !== undefined && plan.ops.length > limit && !plan.approved) {
       throw new WasnewError("NEEDS_APPROVAL", `plan ${id} has ${plan.ops.length} operations; policy wants a person to approve more than ${limit} (wasnew approve ${id})`);
     }
@@ -1316,6 +1432,147 @@ export class Vault {
     await fs.writeFile(this.planPath(id), JSON.stringify(plan, null, 1), "utf8");
     await this.append({ op: "apply", plan: id, batch, done, at: plan.applied.at, ...(by ? { by } : {}) });
     return { plan: id, batch, done, ...(failed ? { failed } : {}) };
+  }
+
+  // ── lessons · agents · trust ────────────────────────────
+
+  /**
+   * Every move and trash an agent started, with whether it ended up undone. Redo entries are
+   * folded into the op they re-apply: it counts as undone only if the last redo was undone too.
+   */
+  private settledOps(entries: JournalEntry[]): { m: Movement; undone: boolean; latest: Movement }[] {
+    const undone = new Set<number>();
+    const redoneBy = new Map<number, Movement>();
+    for (const e of entries) {
+      if (e.op === "undo") undone.add((e as JournalUndo).of);
+      else if ((e.op === "move" || e.op === "trash") && typeof (e as Movement).redoOf === "number") redoneBy.set((e as Movement).redoOf!, e as Movement);
+    }
+    const out: { m: Movement; undone: boolean; latest: Movement }[] = [];
+    for (const e of entries) {
+      if ((e.op !== "move" && e.op !== "trash") || (e as Movement).redoOf !== undefined) continue;
+      let latest = e as Movement;
+      for (let hops = 0; undone.has(latest.seq) && redoneBy.has(latest.seq) && hops < entries.length; hops++) latest = redoneBy.get(latest.seq)!;
+      out.push({ m: e as Movement, undone: undone.has(latest.seq), latest });
+    }
+    return out;
+  }
+
+  /**
+   * The pattern of one op. A name without an extension is a folder when the journal says so;
+   * entries written before wasnew recorded that are looked up at `whereNow`.
+   */
+  private async patternOf(op: "move" | "trash", from: string, to: string | null, whereNow: string, dir?: boolean): Promise<PatternShape> {
+    const fromKey = this.journalKey(from);
+    const base = fromKey.slice(fromKey.lastIndexOf("/") + 1);
+    const dot = base.lastIndexOf(".");
+    let ext = dot > 0 ? base.slice(dot + 1).toLowerCase() : "";
+    if (!ext && (dir ?? (await fs.stat(whereNow).then((st) => st.isDirectory(), () => false)))) ext = "folder";
+    const dirOf = (k: string) => { const i = k.lastIndexOf("/"); return i < 0 ? "./" : k.slice(0, i + 1); };
+    const fromDir = dirOf(fromKey);
+    const toDir = to === null ? "trash" : dirOf(this.journalKey(to));
+    const fold = process.platform === "win32" || process.platform === "darwin";
+    const key = [op, ext, fromDir, toDir].join("\n");
+    return { key: fold ? key.toLowerCase() : key, op, ext, fromDir, toDir };
+  }
+
+  private async patterns(entries: JournalEntry[]): Promise<Pattern[]> {
+    const map = new Map<string, Pattern>();
+    for (const { m, undone, latest } of this.settledOps(entries)) {
+      const now = undone ? path.resolve(this.root, m.from) : m.op === "trash" ? path.resolve(this.store, latest.to) : path.resolve(this.root, m.to);
+      const shape = await this.patternOf(m.op, m.from, m.op === "move" ? m.to : null, now, m.dir);
+      let p = map.get(shape.key);
+      if (!p) map.set(shape.key, p = { ...shape, total: 0, undone: 0, agents: new Set(), reasons: [], first: m.at, last: m.at });
+      p.total++;
+      if (m.by?.agent) p.agents.add(m.by.agent);
+      if (m.at < p.first) p.first = m.at;
+      if (m.at > p.last) p.last = m.at;
+      if (undone) {
+        p.undone++;
+        const r = m.by?.reason;
+        if (r) p.reasons.unshift(r.length > REASON_MAX ? r.slice(0, REASON_MAX - 3) + "..." : r);
+      }
+    }
+    return [...map.values()];
+  }
+
+  private lesson(p: Pattern, kind: "avoid" | "ok"): Lesson {
+    const what = p.ext === "folder" ? "folders" : p.ext ? `*.${p.ext}` : "files without an extension";
+    const agents = [...p.agents];
+    const reasons = [...new Set(p.reasons)].slice(0, 2);
+    const kept = p.total - p.undone;
+    const who = agents.length ? ` (${agents.join(", ")})` : "";
+    const line = kind === "avoid"
+      ? `avoid: ${p.op === "move" ? `moving ${what} from ${p.fromDir} to ${p.toDir}` : `trashing ${what} in ${p.fromDir}`} was undone ${p.undone} of ${p.total} times${who}${reasons.length ? `, last reason "${reasons[0]}"` : ""}`
+      : `ok: ${p.op === "move" ? `${what} ${p.fromDir} → ${p.toDir}` : `trashing ${what} in ${p.fromDir}`} kept ${kept} of ${p.total}`;
+    return { kind, op: p.op, ext: p.ext, fromDir: p.fromDir, toDir: p.toDir, total: p.total, undone: p.undone, kept, agents, reasons, first: p.first, last: p.last, line };
+  }
+
+  private static isAvoid(p: Pattern, minUndone: number): boolean {
+    return p.undone >= minUndone && p.undone / p.total >= 0.5;
+  }
+
+  /**
+   * What the journal says about kinds of operations in this folder: patterns people undid
+   * (`avoid`) and patterns they kept (`ok`), each list at most `limit` long. One journal read.
+   */
+  async lessons(opts: { minUndone?: number; limit?: number } = {}): Promise<Lessons> {
+    const minUndone = opts.minUndone ?? 2;
+    const limit = opts.limit ?? 10;
+    const patterns = await this.patterns(await this.readJournal());
+    const cutoff = new Date(Date.now() - CONFIRMED_AFTER_MS).toISOString();
+    const avoid = patterns.filter((p) => Vault.isAvoid(p, minUndone))
+      .sort((a, b) => b.undone - a.undone || b.last.localeCompare(a.last))
+      .slice(0, limit).map((p) => this.lesson(p, "avoid"));
+    const ok = patterns.filter((p) => p.total >= 5 && p.undone === 0 && p.first <= cutoff)
+      .sort((a, b) => b.total - a.total || b.last.localeCompare(a.last))
+      .slice(0, limit).map((p) => this.lesson(p, "ok"));
+    return { avoid, ok };
+  }
+
+  /** Avoid lessons that match operations of a list about to be run, with how many ops each matches */
+  async lessonsFor(ops: PlanOp[], opts: { minUndone?: number } = {}): Promise<PlanLesson[]> {
+    const minUndone = opts.minUndone ?? 2;
+    const avoid = (await this.patterns(await this.readJournal())).filter((p) => Vault.isAvoid(p, minUndone));
+    if (!avoid.length) return [];
+    const byKey = new Map(avoid.map((p) => [p.key, p]));
+    const matches = new Map<string, number>();
+    for (const op of ops) {
+      const from = op?.op === "move" ? op.from : op?.op === "trash" ? op.path : undefined;
+      if (typeof from !== "string" || (op.op === "move" && typeof op.to !== "string")) continue;
+      const { key } = await this.patternOf(op.op, from, op.op === "move" ? op.to : null, path.resolve(this.root, from));
+      if (byKey.has(key)) matches.set(key, (matches.get(key) ?? 0) + 1);
+    }
+    return [...matches].map(([key, n]) => ({ ...this.lesson(byKey.get(key)!, "avoid"), matches: n })).sort((a, b) => b.undone - a.undone);
+  }
+
+  /** Each agent's record from the journal: ops started, how many ended up undone, first and last seen */
+  async agents(): Promise<AgentRecord[]> {
+    const map = new Map<string, AgentRecord>();
+    for (const { m, undone } of this.settledOps(await this.readJournal())) {
+      const agent = m.by?.agent || "unknown";
+      let a = map.get(agent);
+      if (!a) map.set(agent, a = { agent, ops: 0, undone: 0, undoRate: 0, firstSeen: m.at, lastSeen: m.at });
+      a.ops++;
+      if (undone) a.undone++;
+      if (m.at < a.firstSeen) a.firstSeen = m.at;
+      if (m.at > a.lastSeen) a.lastSeen = m.at;
+    }
+    for (const a of map.values()) a.undoRate = a.undone / a.ops;
+    return [...map.values()].sort((a, b) => b.ops - a.ops || a.agent.localeCompare(b.agent));
+  }
+
+  /**
+   * How many operations `agent` may run without a person's approval: policy.requireApprovalOver,
+   * raised to trust.approvalOver for an agent whose record meets policy.trust. Never lowered, and
+   * never raised for an agent the journal cannot name. undefined means no limit.
+   */
+  async approvalLimit(agent?: string): Promise<number | undefined> {
+    const { policy } = await this.policy();
+    const base = policy.requireApprovalOver;
+    const t = policy.trust;
+    if (base === undefined || !t || !agent || agent === "unknown" || t.approvalOver <= base) return base;
+    const rec = (await this.agents()).find((a) => a.agent === agent);
+    return rec && rec.ops >= t.minOps && rec.undoRate <= t.maxUndoRate ? t.approvalOver : base;
   }
 
   // ── history · recover ───────────────────────────────────
@@ -1496,6 +1753,11 @@ async function sizeOf(abs: string): Promise<number> {
   let total = 0;
   for (const e of await fs.readdir(abs)) total += await sizeOf(path.join(abs, e));
   return total;
+}
+
+function hasExt(p: string): boolean {
+  const base = path.basename(p);
+  return base.lastIndexOf(".") > 0;
 }
 
 function record(m: Movement): MoveRecord {

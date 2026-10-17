@@ -15,7 +15,15 @@ export interface Policy {
   requireApprovalOver?: number;
   /** false turns trash off entirely */
   allowTrash?: boolean;
+  /**
+   * An agent with at least `minOps` recorded operations and an undo rate at or below
+   * `maxUndoRate` gets `approvalOver` as its approval threshold instead of requireApprovalOver.
+   * Never lower than the base threshold, never for an agent the journal cannot name.
+   */
+  trust?: TrustPolicy;
 }
+
+export interface TrustPolicy { minOps: number; maxUndoRate: number; approvalOver: number }
 
 export interface LoadedPolicy {
   policy: Policy;
@@ -30,10 +38,24 @@ function count(v: unknown, key: string): number | undefined {
   return v;
 }
 
+function trust(v: unknown): TrustPolicy | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "object" || v === null || Array.isArray(v)) throw new WasnewError("POLICY_INVALID", "policy.trust must be an object with minOps, maxUndoRate and approvalOver");
+  const o = v as Record<string, unknown>;
+  const unknown = Object.keys(o).filter((k) => !["minOps", "maxUndoRate", "approvalOver"].includes(k));
+  if (unknown.length) throw new WasnewError("POLICY_INVALID", "unknown policy.trust keys: " + unknown.join(", "));
+  const minOps = count(o.minOps, "trust.minOps");
+  const approvalOver = count(o.approvalOver, "trust.approvalOver");
+  if (minOps === undefined || approvalOver === undefined) throw new WasnewError("POLICY_INVALID", "policy.trust needs minOps and approvalOver");
+  const rate = o.maxUndoRate;
+  if (typeof rate !== "number" || !Number.isFinite(rate) || rate < 0 || rate > 1) throw new WasnewError("POLICY_INVALID", "policy.trust.maxUndoRate must be a number from 0 to 1");
+  return { minOps, maxUndoRate: rate, approvalOver };
+}
+
 export function parsePolicy(raw: unknown): LoadedPolicy {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new WasnewError("POLICY_INVALID", "policy must be a JSON object");
   const o = raw as Record<string, unknown>;
-  const known = new Set(["protect", "maxOpsPerBatch", "requireApprovalOver", "allowTrash"]);
+  const known = new Set(["protect", "maxOpsPerBatch", "requireApprovalOver", "allowTrash", "trust"]);
   const unknown = Object.keys(o).filter((k) => !known.has(k));
   if (unknown.length) throw new WasnewError("POLICY_INVALID", "unknown policy keys: " + unknown.join(", "));
   if (o.protect !== undefined && (!Array.isArray(o.protect) || o.protect.some((p) => typeof p !== "string"))) {
@@ -45,6 +67,7 @@ export function parsePolicy(raw: unknown): LoadedPolicy {
     maxOpsPerBatch: count(o.maxOpsPerBatch, "maxOpsPerBatch"),
     requireApprovalOver: count(o.requireApprovalOver, "requireApprovalOver"),
     allowTrash: o.allowTrash as boolean | undefined,
+    trust: trust(o.trust),
   };
   let rules;
   try {

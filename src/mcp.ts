@@ -7,7 +7,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
-import { openVault, type Actor, type Diff, type ManyResult, type PlanOp, type UndoResult, type Vault, type WhereResult } from "./index.js";
+import { openVault, type Actor, type Diff, type ManyResult, type PlanOp, type RedoResult, type UndoResult, type Vault, type WhereResult } from "./index.js";
 import { WasnewError, isWasnewError } from "./errors.js";
 import { summarizeOps, type SummaryOp } from "./summary.js";
 
@@ -27,6 +27,15 @@ const INSTRUCTIONS = `wasnew keeps an undoable history of a folder. Use these to
 - wasnew_restore brings files back to a snapshot and first saves what it overwrites, so it can be undone too.
 - Errors carry a code (DEST_EXISTS, POLICY_PROTECTED, NEEDS_APPROVAL, ...). Read it, fix the input or ask the user, then retry.
 - Read \`summary\` first: it groups similar changes into a few lines. Lists over ${CUT_OVER} items are cut to ${KEEP} unless you pass full: true.`;
+/** Avoid lessons added to the instructions at initialize */
+const LESSONS_IN_INSTRUCTIONS = 5;
+
+/** The base instructions, plus the folder's avoid lessons when it has any */
+export async function instructionsFor(v: Vault): Promise<string> {
+  const { avoid } = await v.lessons({ limit: LESSONS_IN_INSTRUCTIONS }).catch(() => ({ avoid: [] as { line: string }[] }));
+  if (!avoid.length) return INSTRUCTIONS;
+  return [INSTRUCTIONS, "", "Past undos in this folder:", ...avoid.map((l) => "- " + l.line)].join("\n");
+}
 
 interface Tool {
   name: string;
@@ -52,9 +61,9 @@ function actor(ctx: Context, a: { reason?: string; model?: string }): Actor | un
   return Object.keys(by).length ? by : undefined;
 }
 
-/** Many operations at once go through a plan when the folder's policy asks for a person's approval */
-async function gate(v: Vault, n: number): Promise<void> {
-  const limit = (await v.policy()).policy.requireApprovalOver;
+/** Many operations at once go through a plan when the folder's policy asks for a person's approval; a trusted agent's limit can be higher */
+async function gate(v: Vault, n: number, agent: string | undefined): Promise<void> {
+  const limit = await v.approvalLimit(agent);
   if (limit !== undefined && n > limit) {
     throw new WasnewError("NEEDS_APPROVAL", `${n} operations is more than this folder allows without approval (${limit}); propose them with wasnew_plan and ask the user to approve`);
   }
@@ -151,6 +160,19 @@ const undoOps = (list: { from: string; to: string; trashed?: true }[]): SummaryO
 const recordOps = (list: { from: string; to: string; trashed?: true }[]): SummaryOp[] => list.map((r) => (r.trashed ? { op: "trash", from: r.from } : { op: "move", from: r.from, to: r.to }));
 const planOps = (ops: PlanOp[]): SummaryOp[] => ops.map((o) => (o.op === "move" ? { op: "move", from: o.from, to: o.to } : { op: "trash", from: o.path }));
 
+/** wasnew_redo's result: summary of everything redone, lists cut unless `all` */
+export function redoResult(r: RedoResult, all: boolean) {
+  const redone = cutList(r.redone, all);
+  const skipped = cutList(r.skipped, all);
+  return {
+    summary: summarizeOps(recordOps(r.redone)).lines,
+    redone,
+    skipped,
+    ...(r.skipped.length ? { skippedByCode: byCode(r.skipped, (s) => s.reason) } : {}),
+    ...cutInfo(redone.length + skipped.length, r.redone.length + r.skipped.length),
+  };
+}
+
 /** wasnew_undo's result: summary of everything undone, lists cut unless `all` */
 export function undoResult(r: UndoResult, all: boolean) {
   const undone = cutList(r.undone, all);
@@ -231,7 +253,7 @@ const TOOLS: Tool[] = [
     },
     annotations: WRITES,
     async run(v, a, ctx) {
-      await gate(v, a.moves.length);
+      await gate(v, a.moves.length, ctx.client);
       const batch: string = a.batch ?? newBatchId();
       const by = actor(ctx, a);
       const failed: { from: string; to: string; code: string; message: string }[] = [];
@@ -266,7 +288,7 @@ const TOOLS: Tool[] = [
     },
     annotations: WRITES,
     async run(v, a, ctx) {
-      await gate(v, a.paths.length);
+      await gate(v, a.paths.length, ctx.client);
       const batch: string = a.batch ?? newBatchId();
       const by = actor(ctx, a);
       const failed: { path: string; code: string; message: string }[] = [];
@@ -281,7 +303,7 @@ const TOOLS: Tool[] = [
   {
     name: "wasnew_plan",
     title: "Propose changes",
-    description: "Check a list of moves and trashes against the folder without doing anything. Returns a plan id, any issues per operation, and whether the user must approve it first. Show the plan to the user, then call wasnew_apply.",
+    description: "Check a list of moves and trashes against the folder without doing anything. Returns a plan id, any issues per operation, and whether the user must approve it first. `lessons` lists kinds of operations in the plan that the user undid before; reconsider those. Show the plan to the user, then call wasnew_apply.",
     inputSchema: {
       type: "object",
       properties: {
@@ -311,16 +333,18 @@ const TOOLS: Tool[] = [
       }
       const plan = await v.plan(a.ops, { by: actor(ctx, a) });
       const summary = summarizeOps(planOps(plan.ops)).lines;
+      const lessons = (await v.lessonsFor(plan.ops)).map((l) => `${l.line}; matches ${l.matches} of these operations`);
       const source = (i: { index: number }) => { const op = plan.ops[i.index]; return op?.op === "move" ? op.from : op?.path; };
       const f = await failures(v, "issues", plan.issues, !!a.full, source);
       const issues = f.issues as typeof plan.issues;
       const text = [
         `plan ${plan.id}: ${plan.ops.length} operations, ${plan.issues.length} issues${plan.needsApproval ? `, needs the user's approval (wasnew approve ${plan.id})` : ""}`,
         ...summary.map((l) => "  " + l),
+        ...(lessons.length ? ["undone before in this folder:", ...lessons.map((l) => "  " + l)] : []),
         ...issues.map((i) => `  #${i.index} ${i.code}: ${i.message}`),
         ...(issues.length < plan.issues.length ? [`  … ${plan.issues.length - issues.length} more issues`] : []),
       ].join("\n");
-      return { result: { summary, id: plan.id, ops: plan.ops.length, ...f, needsApproval: plan.needsApproval, ...cutInfo(issues.length, plan.issues.length) }, text };
+      return { result: { summary, id: plan.id, ops: plan.ops.length, ...f, needsApproval: plan.needsApproval, ...(lessons.length ? { lessons } : {}), ...cutInfo(issues.length, plan.issues.length) }, text };
     },
   },
   {
@@ -376,6 +400,14 @@ const TOOLS: Tool[] = [
     async run(v, a, ctx) { return { result: undoResult(await v.undo({ batch: a.batch, count: a.count, by: actor(ctx, a) }), !!a.full) }; },
   },
   {
+    name: "wasnew_redo",
+    title: "Redo undone moves",
+    description: "Do again the moves and trashes that were undone: a whole batch, or the last `count` undone. Each is recorded as a new operation, so wasnew_undo can take it back. Never overwrites: if the destination is taken or the file is gone, that one is skipped and reported with a reason.",
+    inputSchema: { type: "object", properties: { batch: str("Batch to redo"), count: int("How many of the most recently undone to redo"), reason, full }, additionalProperties: false },
+    annotations: WRITES,
+    async run(v, a, ctx) { return { result: redoResult(await v.redo({ batch: a.batch, count: a.count, by: actor(ctx, a) }), !!a.full) }; },
+  },
+  {
     name: "wasnew_restore",
     title: "Restore from a snapshot",
     description: "Bring files back to their content in a snapshot (all, or only `paths`). Files the snapshot doesn't have are left alone. What gets overwritten is saved first; the result's `guard` is that snapshot, restorable the same way.",
@@ -396,6 +428,26 @@ const TOOLS: Tool[] = [
       const text = bytes.subarray(0, MAX_READ_BYTES).toString("utf8");
       return { result: { path: a.path, size: bytes.length, truncated }, text: truncated ? text + `\n… truncated at ${MAX_READ_BYTES} of ${bytes.length} bytes` : text };
     },
+  },
+  {
+    name: "wasnew_lessons",
+    title: "What the user undid before",
+    description: "Kinds of moves and trashes in this folder that the user undid (avoid) or kept many times (ok), from the journal. Check before sorting or cleaning up.",
+    inputSchema: { type: "object", properties: { minUndone: int("Undos needed before a pattern counts as one to avoid (default 2)"), limit: int("Most lessons of each kind (default 10)") }, additionalProperties: false },
+    annotations: READ_ONLY,
+    async run(v, a) {
+      const r = await v.lessons({ minUndone: a.minUndone, limit: a.limit });
+      const lines = [...r.avoid, ...r.ok].map((l) => l.line);
+      return { result: r, text: lines.join("\n") || "no lessons yet" };
+    },
+  },
+  {
+    name: "wasnew_agents",
+    title: "Agents' records",
+    description: "Each agent's record in this folder: operations, how many the user undid, undo rate, first and last seen. The agent name comes from the MCP client.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: READ_ONLY,
+    async run(v) { return { result: { agents: await v.agents() } }; },
   },
 ];
 
@@ -420,7 +472,7 @@ export async function serveMcp(opts: { root: string; input: Readable; output: Wr
           protocolVersion: PROTOCOL_VERSIONS.includes(asked) ? asked : PROTOCOL_VERSIONS[0],
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: "wasnew", title: "wasnew", version: VERSION },
-          instructions: INSTRUCTIONS,
+          instructions: await instructionsFor(vault),
         } });
       }
       case "ping":

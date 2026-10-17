@@ -2,7 +2,7 @@
 
 > wasnew is an undo layer for AI agents' file operations: it journals every move, rename and delete an agent makes in any folder, and undoes them per task, with or without git.
 
-wasnew runs as an MCP server (13 tools), a CLI and a TypeScript library. Node 20 or newer, zero runtime dependencies, MIT license. It keeps its data in a `.wasnew/` folder inside the folder it protects: content-addressed snapshots, an append-only journal, a trash folder, plans and a policy file.
+wasnew runs as an MCP server (16 tools), a CLI and a TypeScript library. Node 20 or newer, zero runtime dependencies, MIT license. It keeps its data in a `.wasnew/` folder inside the folder it protects: content-addressed snapshots, an append-only journal, a trash folder, plans and a policy file.
 
 Agents call `wasnew_move` and `wasnew_trash` instead of shell `mv` and `rm`. Each operation is recorded with the agent, model, reason and a batch id, and `wasnew undo --batch <id>` undoes a whole task. Delete means move to trash; only a person can empty it. Large changes can be required to go through plan → approve → apply, and there is no approve tool in MCP, so an agent cannot approve its own plan.
 
@@ -13,7 +13,10 @@ Not yet published to npm; install from source with `pnpm install && pnpm build`,
 ## Docs
 
 - [README](https://github.com/Haejyn/wasnew/blob/main/README.md): definition, quick start, MCP tools, policy, CLI, library, limits
-- [MCP tools](https://github.com/Haejyn/wasnew/blob/main/README.md#mcp-tools): the 13 tools and how large results are summarized
+- [MCP tools](https://github.com/Haejyn/wasnew/blob/main/README.md#mcp-tools): the 16 tools and how large results are summarized
+- [Lessons and trust](https://github.com/Haejyn/wasnew/blob/main/README.md#lessons-and-trust): undone kinds of operations become avoid lines in the MCP instructions and in wasnew_plan results
+- [Trust policy](https://github.com/Haejyn/wasnew/blob/main/README.md#policy-wasnewpolicyjson): an agent with a low undo rate gets a higher approval threshold; the name comes from the MCP client, so it is not a security boundary
+- [Redo](https://github.com/Haejyn/wasnew/blob/main/README.md#cli): `wasnew redo` and `wasnew_redo` do again what was undone, journaled so undo can take it back
 - [Plan → approve → apply](https://github.com/Haejyn/wasnew/blob/main/README.md#plan--approve--apply): approval flow for large changes
 - [Benchmarks](https://github.com/Haejyn/wasnew/blob/main/README.md#benchmarks): wasnew vs git timings and store size, including the case wasnew loses
 - [Token cost](https://github.com/Haejyn/wasnew/blob/main/README.md#token-cost): characters and tokens an agent reads after a 5,300-operation job

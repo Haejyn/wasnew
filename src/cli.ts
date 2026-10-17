@@ -17,6 +17,7 @@ usage: wasnew <command> [options]
   diff <from> [to]            what changed since a snapshot (or between two)
   pending [--batch id]        moves that can still be undone
   undo [--batch id] [-n N]    undo a batch, or its / the journal's last N moves
+  redo [--batch id] [-n N]    do again what was undone: a batch, or the last N undone
   restore <id> [paths...]     restore files from a snapshot (saves what it overwrites)
   gc --keep-last N | --older-than-days D [--apply]
                               drop old snapshots from the store (dry run unless --apply)
@@ -27,6 +28,8 @@ usage: wasnew <command> [options]
   apply <plan>                run an approved plan as one undoable batch
   history <path>              who moved, trashed or restored a file, when and why
   where <path>                where a file is now, following its moves, trash and undo
+  lessons                     kinds of moves and trashes people undid (avoid) or kept (ok)
+  agents                      each agent's operations and undo rate
   recover                     settle operations a crashed process left half-recorded
   empty-trash --older-than-days D [--apply]
                               really delete trashed files (dry run unless --apply)
@@ -110,6 +113,11 @@ async function main(argv: string[]): Promise<number> {
       out(r, [`undone ${r.undone.length}`, ...r.skipped.map((s) => `skipped ${s.to}: ${s.reason}`)].join("\n"));
       return r.skipped.length ? 2 : 0;
     }
+    case "redo": {
+      const r = await vault.redo({ batch: values.batch, count: num(values.count) });
+      out(r, [`redone ${r.redone.length}`, ...r.skipped.map((s) => `skipped ${s.from}: ${s.reason}`)].join("\n"));
+      return r.skipped.length ? 2 : 0;
+    }
     case "restore": {
       if (!rest[0]) throw new Error("restore needs a snapshot id");
       const r = await vault.restore(rest[0], { paths: rest.length > 1 ? rest.slice(1) : undefined });
@@ -151,6 +159,16 @@ async function main(argv: string[]): Promise<number> {
     case "where": {
       const w = await vault.where(need(rest[0], "where needs a path"));
       out(w, formatWhere(w));
+      return 0;
+    }
+    case "lessons": {
+      const r = await vault.lessons();
+      out(r, [...r.avoid, ...r.ok].map((l) => l.line).join("\n") || "no lessons yet");
+      return 0;
+    }
+    case "agents": {
+      const list = await vault.agents();
+      out(list, list.map((a) => `${a.agent.padEnd(24)} ${String(a.ops).padStart(6)} ops  ${String(a.undone).padStart(5)} undone  ${(a.undoRate * 100).toFixed(1).padStart(5)}%  ${a.firstSeen.slice(0, 10)} to ${a.lastSeen.slice(0, 10)}`).join("\n") || "no agents recorded");
       return 0;
     }
     case "recover": {

@@ -10,10 +10,10 @@ wasnew 는 AI 에이전트의 파일 조작을 되돌리는 계층이다. 에이
 
 [English](README.md) | [한국어](README.ko.md)
 
-![tests](https://img.shields.io/badge/tests-114%20passed-16a34a)
+![tests](https://img.shields.io/badge/tests-130%20passed-16a34a)
 ![node](https://img.shields.io/badge/node-%E2%89%A520-339933)
 ![deps](https://img.shields.io/badge/dependencies-0-111111)
-![mcp](https://img.shields.io/badge/MCP-13%20tools-111111)
+![mcp](https://img.shields.io/badge/MCP-16%20tools-111111)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 에이전트는 다운로드 폴더를 정리하고, 사진 이름을 바꾸고, 프로젝트를 치운다. Claude Code 문서는 "Checkpointing does not track files modified by Bash commands" 라고 적고 그 예로 `rm`, `mv`, `cp` 를 든다([출처](https://code.claude.com/docs/en/checkpointing)). git 은 저장소 안의 커밋한 파일만 되돌린다.
@@ -65,6 +65,9 @@ user   wasnew undo --batch plan-f51626427972437c      → undone 199
 | `wasnew_read` | 파일을 그 시점의 내용으로 읽기 |
 | `wasnew_log` | 스냅샷 목록 |
 | `wasnew_pending` | 아직 되돌릴 수 있는 이동 |
+| `wasnew_redo` | 되돌린 것을 다시 하기. 묶음 전체나 마지막 N개. 새 조작으로 기록되어 `wasnew_undo` 로 다시 되돌릴 수 있음 |
+| `wasnew_lessons` | 이 폴더에서 사용자가 되돌린(avoid) 조작 종류와 여러 번 그대로 둔(ok) 종류 |
+| `wasnew_agents` | 이 폴더에서 에이전트마다 조작 수, 되돌린 수, 되돌림 비율 |
 
 - 접속한 클라이언트 이름(`clientInfo`)이 에이전트로 기록되고, 모델은 `model` 과 `reason` 을 덧붙인다
 - 승인 도구는 MCP 에 없다. 에이전트는 스스로 승인할 수 없다
@@ -85,6 +88,7 @@ user   wasnew undo --batch plan-f51626427972437c      → undone 199
 | `requireApprovalOver` | 이보다 많은 조작은 계획 → 사람의 `approve` → 적용으로만 |
 | `maxOpsPerBatch` | 한 batch 의 최대 조작 수 (폭발 반경) |
 | `allowTrash` | `false` 면 휴지통도 끔 |
+| `trust` | `{ "minOps": 50, "maxUndoRate": 0.05, "approvalOver": 200 }`. 조작이 `minOps` 이상이고 되돌림 비율이 `maxUndoRate` 이하인 에이전트는 `requireApprovalOver` 대신 `approvalOver` 를 씀. 기본값보다 낮아지지 않고, 이름 없이(unknown) 기록된 에이전트에는 적용 안 됨 |
 
 정책 파일이 잘못되면 고칠 때까지 모든 조작이 `POLICY_INVALID`로 막힌다.
 
@@ -101,6 +105,18 @@ person wasnew undo --batch plan-baebff75
 ```
 
 계획은 앞선 조작의 결과를 따라가며 검사한다. 이미 옮겨진 원본, 계획 안에서 겹치는 목적지, 보호 경로, 한도를 조작 번호와 함께 알려 준다.
+
+## 되돌림에서 배우기와 신뢰
+
+wasnew 는 저널의 이동과 휴지통을 종류별로(조작, 확장자나 폴더, 원래 폴더, 옮긴 폴더) 묶고 그중 몇 개가 되돌려졌는지 센다. 두 번 이상, 절반 이상 되돌려진 종류는 avoid 교훈이 된다. 에이전트가 접속하면 그중 5개까지 MCP instructions 에 붙고, `wasnew_plan` 은 계획 안의 조작과 맞는 교훈을 `lessons` 로 돌려준다:
+
+```text
+Past undos in this folder:
+- avoid: moving *.hwp from ./ to Docs/ was undone 3 of 3 times (claude-code 2.1.0), last reason "group documents by type"
+- avoid: trashing folders in ./ was undone 2 of 2 times (claude-code 2.1.0), last reason "remove build output"
+```
+
+같은 숫자로 에이전트마다 되돌림 비율이 나오고(`wasnew agents`), `trust` 정책 키는 이 비율로 승인 기준을 올린다. 에이전트 이름은 MCP 클라이언트의 `clientInfo` 로, 모델이 아니라 클라이언트 프로그램이 정한다. 클라이언트 버전도 이름에 들어가서 클라이언트를 업데이트하면 기록이 새로 시작된다. 신뢰는 승인 요청을 줄이는 편의 기능이고 보안 경계가 아니다. 접속하는 프로그램은 어떤 이름이든 보낼 수 있다.
 
 ## 실측
 
@@ -182,10 +198,13 @@ wasnew log
 wasnew diff <id>              # 지금과 비교, 두 번째 id 를 주면 스냅샷끼리
 wasnew pending --batch agent-1
 wasnew undo --batch agent-1   # -n 3 이면 마지막 3개만
+wasnew redo --batch agent-1   # 되돌린 것을 다시, -n 3 이면 마지막으로 되돌린 3개만
 wasnew restore <id> docs/a.md
 wasnew plans                  # show <id>, approve <id>, apply <id> 도
 wasnew history <path>
 wasnew where <path>           # 옛 경로의 파일이 지금 어디 있는지
+wasnew lessons                # 사람들이 되돌리거나 그대로 둔 조작 종류
+wasnew agents                 # 에이전트마다 조작 수와 되돌림 비율
 wasnew recover                # 죽은 프로세스가 남긴 반쯤 기록된 조작 정리
 wasnew policy
 wasnew gc --keep-last 20      # 저장소 정리, 기본은 미리보기, --apply 로 실행
@@ -205,6 +224,8 @@ const before = await vault.snapshot({ label: "정리 전" });
 await vault.move("스크린샷 (3).png", "Pictures/2026/스크린샷 (3).png", "run-42", by);
 await vault.trash("임시.tmp", "run-42", by);
 const { undone, skipped } = await vault.undo({ batch: "run-42" });
+await vault.redo({ batch: "run-42" });           // 마음이 바뀌면 다시, undo 로 또 되돌릴 수 있다
+const { avoid } = await vault.lessons();          // 이 폴더에서 사람들이 되돌린 것
 const { guard } = await vault.restore(before.id);   // guard 로 복원도 되돌린다
 
 const plan = await vault.plan([{ op: "move", from: "a.pdf", to: "Docs/a.pdf" }], { by });
@@ -242,7 +263,7 @@ await vault.history("Docs/a.pdf");
 ## 개발
 
 ```bash
-pnpm test        # 114개: 스냅샷, stat 캐시, watch, 복원 guard, 볼륨 간 이동, 잠금, 휴지통, 출처, 정책, 계획/승인, 복구, MCP 왕복, 훅, 요약
+pnpm test        # 130개: 스냅샷, stat 캐시, watch, 복원 guard, 볼륨 간 이동, 잠금, 휴지통, 출처, 정책, 계획/승인, 복구, MCP 왕복, 훅, 요약, 교훈, 신뢰, 다시 하기
 pnpm typecheck
 pnpm build       # dist/ 에 CLI 와 MCP 서버
 pnpm bench       # bench:git, bench:tokens 도
@@ -289,7 +310,7 @@ Claude Code 라면 [examples/claude-code](examples/claude-code/) 의 `PreToolUse
 
 ### Codex, Gemini CLI, Cursor 에서도 되나요?
 
-MCP 클라이언트라면 13개 도구를 모두 씁니다. 그 클라이언트의 MCP 설정에 `wasnew mcp --root <폴더>` 를 stdio 서버로 넣으세요. 셸을 막는 훅과 옮겨진 파일 훅은 Claude Code 의 훅 형식으로 만들었습니다.
+MCP 클라이언트라면 16개 도구를 모두 씁니다. 그 클라이언트의 MCP 설정에 `wasnew mcp --root <폴더>` 를 stdio 서버로 넣으세요. 셸을 막는 훅과 옮겨진 파일 훅은 Claude Code 의 훅 형식으로 만들었습니다.
 
 ### 디스크를 얼마나 쓰나요?
 

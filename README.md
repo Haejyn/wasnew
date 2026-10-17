@@ -10,10 +10,10 @@ A real Claude Code session, run headless and replayed from its log ([scripts/dem
 
 [English](README.md) | [한국어](README.ko.md)
 
-![tests](https://img.shields.io/badge/tests-114%20passed-16a34a)
+![tests](https://img.shields.io/badge/tests-130%20passed-16a34a)
 ![node](https://img.shields.io/badge/node-%E2%89%A520-339933)
 ![deps](https://img.shields.io/badge/dependencies-0-111111)
-![mcp](https://img.shields.io/badge/MCP-13%20tools-111111)
+![mcp](https://img.shields.io/badge/MCP-16%20tools-111111)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 Agents sort Downloads folders, rename photo libraries and clean up project trees. The Claude Code docs state: "Checkpointing does not track files modified by Bash commands", and they give `rm`, `mv` and `cp` as examples ([source](https://code.claude.com/docs/en/checkpointing)). git covers committed files in a repository and nothing else.
@@ -65,6 +65,9 @@ user   wasnew undo --batch plan-f51626427972437c      → undone 199
 | `wasnew_read` | Read a file as it was in a snapshot |
 | `wasnew_log` | List snapshots |
 | `wasnew_pending` | Moves that can still be undone |
+| `wasnew_redo` | Do again what was undone: a whole batch or the last N. Recorded as new operations, so `wasnew_undo` can take the redo back |
+| `wasnew_lessons` | Kinds of moves and trashes the user undid (avoid) or kept many times (ok) in this folder |
+| `wasnew_agents` | Each agent's operations, undos and undo rate in this folder |
 
 - The MCP client name (`clientInfo`) is recorded as the agent; the model adds `model` and `reason`.
 - There is no approve tool in MCP. An agent cannot approve its own plan.
@@ -85,6 +88,7 @@ user   wasnew undo --batch plan-f51626427972437c      → undone 199
 | `requireApprovalOver` | More operations than this go through plan → `approve` by a person → apply |
 | `maxOpsPerBatch` | Most operations in one batch (blast radius) |
 | `allowTrash` | `false` turns off trashing too |
+| `trust` | `{ "minOps": 50, "maxUndoRate": 0.05, "approvalOver": 200 }`. An agent with at least `minOps` operations and an undo rate at or below `maxUndoRate` gets `approvalOver` instead of `requireApprovalOver`. Never lower than the base, never for an agent recorded as unknown |
 
 If the policy file is invalid, every operation fails with `POLICY_INVALID` until it is fixed.
 
@@ -101,6 +105,18 @@ person wasnew undo --batch plan-baebff75
 ```
 
 A plan is checked in order, each operation against the result of the ones before it. Sources already moved, destinations that collide within the plan, protected paths and limits are reported with the operation number.
+
+## Lessons and trust
+
+wasnew groups the journal's moves and trashes by kind (operation, file extension or folder, source folder, destination folder) and counts how many were undone. A kind undone at least twice and in at least half the cases becomes an avoid lesson. When an agent connects, up to 5 of them are added to the MCP instructions, and `wasnew_plan` returns `lessons` for operations in the plan that match one:
+
+```text
+Past undos in this folder:
+- avoid: moving *.hwp from ./ to Docs/ was undone 3 of 3 times (claude-code 2.1.0), last reason "group documents by type"
+- avoid: trashing folders in ./ was undone 2 of 2 times (claude-code 2.1.0), last reason "remove build output"
+```
+
+The same counts give each agent an undo rate (`wasnew agents`), which the `trust` policy key uses to raise the approval threshold. The agent name is the MCP client's `clientInfo`, set by the client program, not by the model. It includes the client's version, so a client update starts a new record. Trust saves approval prompts; it is not a security boundary, since any program that connects can send any name.
 
 ## Benchmarks
 
@@ -182,10 +198,13 @@ wasnew log
 wasnew diff <id>              # against now; a second id compares two snapshots
 wasnew pending --batch agent-1
 wasnew undo --batch agent-1   # -n 3 undoes only the last 3
+wasnew redo --batch agent-1   # do it again; -n 3 redoes the last 3 undone
 wasnew restore <id> docs/a.md
 wasnew plans                  # also: show <id>, approve <id>, apply <id>
 wasnew history <path>
 wasnew where <path>           # where the file at an old path is now
+wasnew lessons                # kinds of operations people undid or kept
+wasnew agents                 # each agent's operations and undo rate
 wasnew recover                # settle operations a crashed process left half-recorded
 wasnew policy
 wasnew gc --keep-last 20      # prune the store; dry run unless --apply
@@ -205,6 +224,8 @@ const before = await vault.snapshot({ label: "before cleanup" });
 await vault.move("Screenshot (3).png", "Pictures/2026/Screenshot (3).png", "run-42", by);
 await vault.trash("temp.tmp", "run-42", by);
 const { undone, skipped } = await vault.undo({ batch: "run-42" });
+await vault.redo({ batch: "run-42" });           // changed my mind; undo works on it again
+const { avoid } = await vault.lessons();          // what people undid in this folder
 const { guard } = await vault.restore(before.id);   // guard undoes the restore too
 
 const plan = await vault.plan([{ op: "move", from: "a.pdf", to: "Docs/a.pdf" }], { by });
@@ -242,7 +263,7 @@ Error codes: `DEST_EXISTS`, `OUTSIDE_ROOT`, `IN_STORE`, `NOT_FOUND`, `CROSS_DEVI
 ## Development
 
 ```bash
-pnpm test        # 114 tests: snapshots, stat cache, watch, restore guard, cross-volume moves, locks, trash, provenance, policy, plan/approve, recovery, MCP round trips, hooks, summaries
+pnpm test        # 130 tests: snapshots, stat cache, watch, restore guard, cross-volume moves, locks, trash, provenance, policy, plan/approve, recovery, MCP round trips, hooks, summaries, lessons, trust, redo
 pnpm typecheck
 pnpm build       # CLI and MCP server into dist/
 pnpm bench       # also bench:git, bench:tokens
@@ -289,7 +310,7 @@ No. There is no approve tool in MCP. A person runs `wasnew approve <id>` in a te
 
 ### Does it work with Codex, Gemini CLI or Cursor?
 
-Any MCP client can use the 13 tools; run `wasnew mcp --root <folder>` as a stdio server in that client's MCP settings. The shell-blocking and moved-file hooks are written for Claude Code's hook format.
+Any MCP client can use the 16 tools; run `wasnew mcp --root <folder>` as a stdio server in that client's MCP settings. The shell-blocking and moved-file hooks are written for Claude Code's hook format.
 
 ### How much disk does it use?
 
