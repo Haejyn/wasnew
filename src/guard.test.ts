@@ -51,11 +51,12 @@ describe("Claude Code moved-file hook", () => {
   });
   afterEach(async () => { await fs.rm(root, { recursive: true, force: true }); });
 
-  it("blocks a Read, Edit or Write of a moved file and gives the new path", async () => {
+  it("blocks a Read or Edit of a moved file and gives the new path, lets a Write create a new one", async () => {
     const v = await openVault(root);
     await v.move("a.pdf", "Papers/2026/a.pdf", "t1", { agent: "claude-code" });
     await v.move("docs", "notes", "t1");
-    for (const tool of ["Read", "Edit", "Write"]) {
+    expect(open("Write", path.join(root, "a.pdf")).status).toBe(0);
+    for (const tool of ["Read", "Edit"]) {
       const r = open(tool, path.join(root, "a.pdf"));
       expect(r.status).toBe(2);
       expect(r.stderr).toContain("a.pdf was moved to Papers/2026/a.pdf (by claude-code at ");

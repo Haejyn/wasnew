@@ -14,7 +14,7 @@ claude mcp add --transport stdio wasnew -- node /path/to/wasnew/bin/wasnew.js mc
 |---|---|
 | `UserPromptSubmit` | 요청을 보낼 때마다 `$WASNEW_ROOT` 폴더를 스냅샷(`--if-changed`면 바뀐 게 없을 때 건너뜀). 안 바뀐 파일은 다시 읽지 않아 빠름 |
 | `PreToolUse` · `Bash` | [`guard.mjs`](guard.mjs) 가 `rm` · `mv` · `del` · `Remove-Item` · `git clean` · `git reset --hard` · `find -delete` 를 막고, 대신 `wasnew_trash` · `wasnew_move` 를 쓰라고 에이전트에게 돌려줌 |
-| `PreToolUse` · `Read` · `Edit` · `Write` | [`moved.mjs`](moved.mjs) 가 없는 파일을 열려고 할 때 저널에 옮겨진 기록이 있으면 막고 새 경로를 알려 줌. 휴지통에 있으면 되돌릴 batch 를 알려 줌(`Write` 는 통과). 파일이 있거나 기록이 없으면 그냥 통과 |
+| `PreToolUse` · `Read` · `Edit` | [`moved.mjs`](moved.mjs) 가 없는 파일을 열려고 할 때 저널에 옮겨진 기록이 있으면 막고 새 경로를 알려 줌. 휴지통에 있으면 되돌릴 batch 를 알려 줌. 새 파일을 만드는 `Write` 는 늘 통과. 파일이 있거나 기록이 없으면 그냥 통과 |
 
 [`settings.json`](settings.json) 의 경로를 바꿔 `~/.claude/settings.json` 이나 프로젝트의 `.claude/settings.json` 에 합치세요. `WASNEW_ROOT` 는 지킬 폴더입니다.
 Windows 에서는 훅 명령이 PowerShell 로 돌아 `$WASNEW_ROOT` 가 펼쳐지지 않습니다. 폴더 경로를 직접 적으세요.

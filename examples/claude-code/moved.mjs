@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Claude Code PreToolUse hook for Read, Edit and Write: when the file is gone and wasnew's journal
+// Claude Code PreToolUse hook for Read and Edit: when the file is gone and wasnew's journal
 // says it moved, blocks the call and tells the agent the new path. It never blocks when the file
 // exists or the journal knows nothing about it. One journal read, no dependencies; any error lets
 // the call through. Mirrors Vault.where() in src/index.ts.
@@ -17,6 +17,9 @@ try {
 pass();
 
 function run(hook) {
+  // writing a new file at a name that moved or was trashed is a normal thing to do; an agent that
+  // means the old file reads or edits it first and is pointed at the new place there
+  if (hook?.tool_name === "Write") return;
   const file = hook?.tool_input?.file_path ?? hook?.tool_input?.notebook_path;
   if (typeof file !== "string" || !file) return;
   const abs = path.resolve(typeof hook.cwd === "string" ? hook.cwd : process.cwd(), file);
@@ -78,8 +81,7 @@ function run(hook) {
   const by = last.by?.agent ?? last.by?.model;
   const when = `${by ? ` by ${by}` : ""} at ${String(last.at).slice(0, 16)}Z${last.batch ? `, batch ${last.batch}` : ""}`;
   if (trashed) {
-    // writing a new file where a trashed one was is a normal thing to do
-    if (hook.tool_name === "Write" || !existsSync(path.join(root, ".wasnew", trashed.path))) return;
+    if (!existsSync(path.join(root, ".wasnew", trashed.path))) return;
     block(`${start} is in wasnew's trash (trashed${when}). Undo that batch with wasnew_undo to bring it back, or ask the user.`);
   }
   const now = path.join(root, cur);

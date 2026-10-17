@@ -15,7 +15,7 @@
         ]
       },
       {
-        "matcher": "Read|Edit|MultiEdit|Write",
+        "matcher": "Read|Edit|MultiEdit",
         "hooks": [
           { "type": "command", "command": "node /path/to/wasnew/examples/claude-code/moved.mjs" }
         ]
