@@ -10,7 +10,7 @@ A real Claude Code session, run headless and replayed from its log ([scripts/dem
 
 [English](README.md) | [한국어](README.ko.md)
 
-![tests](https://img.shields.io/badge/tests-130%20passed-16a34a)
+![tests](https://img.shields.io/badge/tests-131%20passed-16a34a)
 ![node](https://img.shields.io/badge/node-%E2%89%A520-339933)
 ![deps](https://img.shields.io/badge/dependencies-0-111111)
 ![mcp](https://img.shields.io/badge/MCP-16%20tools-111111)
@@ -112,11 +112,11 @@ wasnew groups the journal's moves and trashes by kind (operation, file extension
 
 ```text
 Past undos in this folder:
-- avoid: moving *.hwp from ./ to Docs/ was undone 3 of 3 times (claude-code 2.1.0), last reason "group documents by type"
-- avoid: trashing folders in ./ was undone 2 of 2 times (claude-code 2.1.0), last reason "remove build output"
+- avoid: moving *.hwp from ./ to Docs/ was undone 3 of 3 times (claude-code)
+- avoid: trashing folders in ./ was undone 2 of 2 times (claude-code)
 ```
 
-The same counts give each agent an undo rate (`wasnew agents`), which the `trust` policy key uses to raise the approval threshold. The agent name is the MCP client's `clientInfo`, set by the client program, not by the model. It includes the client's version, so a client update starts a new record. Trust saves approval prompts; it is not a security boundary, since any program that connects can send any name.
+The same counts give each agent an undo rate (`wasnew agents`), which the `trust` policy key uses to raise the approval threshold. The agent name is the MCP client's `clientInfo`, set by the client program, not by the model. Records are kept per client name without its version, so a client update keeps the record. Past agents' `reason` text stays in `wasnew_lessons` output and is never copied into another agent's instructions. Trust saves approval prompts; it is not a security boundary, since any program that connects can send any name.
 
 ## Benchmarks
 

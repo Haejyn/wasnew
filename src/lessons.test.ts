@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
-import { openVault, parsePolicy, type Vault } from "./index.js";
+import { agentName, openVault, parsePolicy, type Vault } from "./index.js";
 import { serveMcp } from "./mcp.js";
 
 let root: string;
@@ -57,12 +57,13 @@ const hello = (name = "claude-code") => ({ jsonrpc: "2.0", id: 0, method: "initi
 const call = (id: number, name: string, args: object = {}) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
 
 describe("lessons", () => {
-  it("turns repeated undos into an avoid line with the agent and the last reason", async () => {
+  it("turns repeated undos into an avoid line with the agent; reasons stay data, out of the line", async () => {
     const v = await openVault(root);
     await undoneMoves(v, "hwp", 2, "Docs", "b1");
     await undoneMoves(v, "HWP", 1, "Docs", "b2", claude("hwp files belong in Docs"));
     const { avoid, ok } = await v.lessons();
-    expect(avoid.map((l) => l.line)).toEqual([`avoid: moving *.hwp from ./ to Docs/ was undone 3 of 3 times (claude-code), last reason "hwp files belong in Docs"`]);
+    expect(avoid.map((l) => l.line)).toEqual([`avoid: moving *.hwp from ./ to Docs/ was undone 3 of 3 times (claude-code)`]);
+    expect(avoid[0].line).not.toContain("hwp files belong");   // past agents' words never reach another agent's instructions
     expect(avoid[0]).toMatchObject({ kind: "avoid", op: "move", ext: "hwp", fromDir: "./", toDir: "Docs/", total: 3, undone: 3, kept: 0, reasons: ["hwp files belong in Docs", "sort hwp"] });
     expect(ok).toEqual([]);
   });
@@ -100,7 +101,7 @@ describe("lessons", () => {
       await v.trash("old", b, claude("clean up"));
       await v.undo({ batch: b });
     }
-    expect((await v.lessons()).avoid.map((l) => l.line)).toEqual([`avoid: trashing folders in ./ was undone 2 of 2 times (claude-code), last reason "clean up"`]);
+    expect((await v.lessons()).avoid.map((l) => l.line)).toEqual([`avoid: trashing folders in ./ was undone 2 of 2 times (claude-code)`]);
     await v.redo({ batch: "f2" });
     expect((await v.lessons()).avoid).toEqual([]);
     expect((await v.lessons({ minUndone: 1 })).avoid[0]).toMatchObject({ undone: 1, total: 2, kept: 1 });
@@ -127,7 +128,7 @@ describe("lessons", () => {
       call(1, "wasnew_plan", { ops: [{ op: "move", from: "x.hwp", to: "Docs/x.hwp" }] }),
       call(2, "wasnew_lessons"),
     ]);
-    const line = `avoid: moving *.hwp from ./ to Docs/ was undone 3 of 3 times (claude-code), last reason "sort hwp"`;
+    const line = `avoid: moving *.hwp from ./ to Docs/ was undone 3 of 3 times (claude-code)`;
     expect(init.result.instructions.startsWith(plain.result.instructions + "\n\nPast undos in this folder:\n- " + line)).toBe(true);
     expect(plan.result.structuredContent.lessons).toEqual([line + "; matches 1 of these operations"]);
     expect(plan.result.content[0].text).toContain("undone before in this folder:\n  " + line);
@@ -316,5 +317,14 @@ describe("redo", () => {
     expect(redo.result.structuredContent).toMatchObject({ summary: ["2 × *.txt  ./ → s/"], skipped: [] });
     expect(redo.result.structuredContent.redone[0].by).toEqual({ agent: "claude-code", reason: "user changed their mind" });
     expect(await read("s/b.txt")).toBe("B");
+  });
+});
+
+describe("agentName", () => {
+  it("drops the client version so an update keeps the agent's record", () => {
+    expect(agentName("claude-code 2.1.0")).toBe("claude-code");
+    expect(agentName("codex v0.9.1-beta")).toBe("codex");
+    expect(agentName("my agent")).toBe("my agent");
+    expect(agentName(undefined)).toBe("");
   });
 });

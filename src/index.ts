@@ -212,6 +212,14 @@ async function eachLimit<T>(items: T[], limit: number, fn: (item: T, i: number) 
   if (failed) throw failed.error;
 }
 
+/**
+ * An agent's record is kept per client program, not per version: "claude-code 2.1.0" and
+ * "claude-code 2.2.0" are one agent, so updating the client does not reset its trust.
+ */
+export function agentName(agent: string | undefined): string {
+  return (agent ?? "").trim().replace(/\s+v?\d+(\.\d+)*([-+][\w.]+)?$/, "");
+}
+
 function failure(index: number, e: any): OpFailure {
   return { index, code: e?.code ?? "ERROR", message: String(e?.message ?? e) };
 }
@@ -1483,7 +1491,7 @@ export class Vault {
       let p = map.get(shape.key);
       if (!p) map.set(shape.key, p = { ...shape, total: 0, undone: 0, agents: new Set(), reasons: [], first: m.at, last: m.at });
       p.total++;
-      if (m.by?.agent) p.agents.add(m.by.agent);
+      if (m.by?.agent) p.agents.add(agentName(m.by.agent));
       if (m.at < p.first) p.first = m.at;
       if (m.at > p.last) p.last = m.at;
       if (undone) {
@@ -1502,7 +1510,7 @@ export class Vault {
     const kept = p.total - p.undone;
     const who = agents.length ? ` (${agents.join(", ")})` : "";
     const line = kind === "avoid"
-      ? `avoid: ${p.op === "move" ? `moving ${what} from ${p.fromDir} to ${p.toDir}` : `trashing ${what} in ${p.fromDir}`} was undone ${p.undone} of ${p.total} times${who}${reasons.length ? `, last reason "${reasons[0]}"` : ""}`
+      ? `avoid: ${p.op === "move" ? `moving ${what} from ${p.fromDir} to ${p.toDir}` : `trashing ${what} in ${p.fromDir}`} was undone ${p.undone} of ${p.total} times${who}`
       : `ok: ${p.op === "move" ? `${what} ${p.fromDir} → ${p.toDir}` : `trashing ${what} in ${p.fromDir}`} kept ${kept} of ${p.total}`;
     return { kind, op: p.op, ext: p.ext, fromDir: p.fromDir, toDir: p.toDir, total: p.total, undone: p.undone, kept, agents, reasons, first: p.first, last: p.last, line };
   }
@@ -1549,7 +1557,7 @@ export class Vault {
   async agents(): Promise<AgentRecord[]> {
     const map = new Map<string, AgentRecord>();
     for (const { m, undone } of this.settledOps(await this.readJournal())) {
-      const agent = m.by?.agent || "unknown";
+      const agent = agentName(m.by?.agent) || "unknown";
       let a = map.get(agent);
       if (!a) map.set(agent, a = { agent, ops: 0, undone: 0, undoRate: 0, firstSeen: m.at, lastSeen: m.at });
       a.ops++;
@@ -1571,7 +1579,7 @@ export class Vault {
     const base = policy.requireApprovalOver;
     const t = policy.trust;
     if (base === undefined || !t || !agent || agent === "unknown" || t.approvalOver <= base) return base;
-    const rec = (await this.agents()).find((a) => a.agent === agent);
+    const rec = (await this.agents()).find((a) => a.agent === agentName(agent));
     return rec && rec.ops >= t.minOps && rec.undoRate <= t.maxUndoRate ? t.approvalOver : base;
   }
 

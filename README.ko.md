@@ -10,7 +10,7 @@ wasnew 는 AI 에이전트의 파일 조작을 되돌리는 계층이다. 에이
 
 [English](README.md) | [한국어](README.ko.md)
 
-![tests](https://img.shields.io/badge/tests-130%20passed-16a34a)
+![tests](https://img.shields.io/badge/tests-131%20passed-16a34a)
 ![node](https://img.shields.io/badge/node-%E2%89%A520-339933)
 ![deps](https://img.shields.io/badge/dependencies-0-111111)
 ![mcp](https://img.shields.io/badge/MCP-16%20tools-111111)
@@ -112,11 +112,11 @@ wasnew 는 저널의 이동과 휴지통을 종류별로(조작, 확장자나 �
 
 ```text
 Past undos in this folder:
-- avoid: moving *.hwp from ./ to Docs/ was undone 3 of 3 times (claude-code 2.1.0), last reason "group documents by type"
-- avoid: trashing folders in ./ was undone 2 of 2 times (claude-code 2.1.0), last reason "remove build output"
+- avoid: moving *.hwp from ./ to Docs/ was undone 3 of 3 times (claude-code)
+- avoid: trashing folders in ./ was undone 2 of 2 times (claude-code)
 ```
 
-같은 숫자로 에이전트마다 되돌림 비율이 나오고(`wasnew agents`), `trust` 정책 키는 이 비율로 승인 기준을 올린다. 에이전트 이름은 MCP 클라이언트의 `clientInfo` 로, 모델이 아니라 클라이언트 프로그램이 정한다. 클라이언트 버전도 이름에 들어가서 클라이언트를 업데이트하면 기록이 새로 시작된다. 신뢰는 승인 요청을 줄이는 편의 기능이고 보안 경계가 아니다. 접속하는 프로그램은 어떤 이름이든 보낼 수 있다.
+같은 숫자로 에이전트마다 되돌림 비율이 나오고(`wasnew agents`), `trust` 정책 키는 이 비율로 승인 기준을 올린다. 에이전트 이름은 MCP 클라이언트의 `clientInfo` 로, 모델이 아니라 클라이언트 프로그램이 정한다. 기록은 버전을 뗀 클라이언트 이름으로 모아서, 클라이언트를 업데이트해도 이어진다. 예전 에이전트가 쓴 `reason` 은 `wasnew_lessons` 결과에만 남고 다른 에이전트의 instructions 에는 들어가지 않는다. 신뢰는 승인 요청을 줄이는 편의 기능이고 보안 경계가 아니다. 접속하는 프로그램은 어떤 이름이든 보낼 수 있다.
 
 ## 실측
 
