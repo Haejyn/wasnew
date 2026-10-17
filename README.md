@@ -41,13 +41,11 @@ For Claude Desktop, add to `claude_desktop_config.json`:
 ## An agent session
 
 ```text
-user   sort my downloads, trash the .tmp junk
-agent  wasnew_snapshot  "before sorting Downloads"   → 20261017-104203512-a1f3
-agent  wasnew_move      214 moves, batch sort-dl     → 151 × *.jpg  ./ → Pictures/2026/
-                                                       63 × *.pdf  ./ → Docs/
-agent  wasnew_trash     12 paths, batch sort-dl      → 12 × *.tmp  ./ → trash
-agent  wasnew_diff      from 20261017-104203512-a1f3 → 0 added, 0 changed, 12 missing, 214 moved
-user   wasnew undo --batch sort-dl                   → undone 226
+user   sort my downloads into folders and get rid of the junk
+agent  wasnew_snapshot  "before sorting"              → 201 files
+agent  wasnew_plan      199 operations                → 0 issues, no approval needed
+agent  wasnew_apply     plan f51626427972437c         → 177 moved into 12 folders, 22 trashed
+user   wasnew undo --batch plan-f51626427972437c      → undone 199
 ```
 
 ## MCP tools
