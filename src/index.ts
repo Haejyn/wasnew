@@ -37,6 +37,11 @@ const DEFAULT_IGNORE = [STORE_DIR, ".git", "node_modules", ".DS_Store", "Thumbs.
 /** gc leaves young blobs alone — a snapshot running concurrently may have written them before its manifest */
 const GC_GRACE_MS = 10 * 60_000;
 const RACY_MS = 2000;
+/**
+ * Moves, trashes and undos are committed in groups of this many: one inflight marker, one lock
+ * and one journal write per group instead of per operation (3,004 single moves took 7.5 s on NTFS).
+ */
+const GROUP_SIZE = 256;
 
 export interface SnapshotFile {
   /** root-relative, posix separators */
@@ -100,13 +105,32 @@ export interface Plan {
   approved?: { at: string; by?: string };
   applied?: { at: string; batch: string };
 }
-export interface ApplyResult { plan: string; batch: string; done: number; failed?: { index: number; code: string; message: string } }
+export interface OpFailure { index: number; code: string; message: string }
+export interface ApplyResult { plan: string; batch: string; done: number; failed?: OpFailure }
+/** What moveMany and trashMany did: `done` ops in order, then stopped at `failed` if anything went wrong */
+export interface ManyResult {
+  done: number;
+  /** trashMany: where each done op went, relative to the store */
+  trashed?: string[];
+  failed?: OpFailure;
+}
 export interface HistoryEvent { seq: number; op: string; at: string; from?: string; to?: string; batch?: string; by?: Actor; undone?: boolean }
 export interface RecoverItem { op: string; from: string; to: string; outcome: "journaled" | "not-started" | "both-exist" | "missing" | "in-progress" }
 export interface TrashPurge { dryRun: boolean; entries: { from: string; to: string; at: string }[]; bytes: number }
 export interface VaultOptions {
   /** extra file or folder names never captured (on top of .git, node_modules, OS litter) */
   ignore?: string[];
+}
+
+type JournalLine = { op: string; at: string; [key: string]: unknown };
+/** One operation of a group, as written to the inflight marker */
+interface InflightItem { src: string; dst: string; entry: Record<string, unknown> & { op: string }; looksDone?: boolean }
+interface PerformItem extends InflightItem { kind: "move" | "trash"; caseOnly: boolean; rel: string; storeTo?: string }
+interface UndoItem extends InflightItem { m: Movement; caseOnly: boolean }
+interface GroupOutcome { done: number[]; errors: { i: number; error: unknown }[]; journalError?: unknown }
+
+function failure(index: number, e: any): OpFailure {
+  return { index, code: e?.code ?? "ERROR", message: String(e?.message ?? e) };
 }
 
 function toPosix(rel: string): string {
@@ -566,15 +590,20 @@ export class Vault {
   }
 
   /** Appends under a cross-process lock so two writers can never hand out the same seq */
-  private async append(entry: { op: string; at: string; [key: string]: unknown }): Promise<number> {
+  private async append(entry: JournalLine): Promise<number> {
+    return this.appendMany([entry]);
+  }
+
+  /** Several entries with consecutive seqs, under one lock and in one write. Returns the first seq. */
+  private async appendMany(entries: JournalLine[]): Promise<number> {
     return withLock(this.lockPath, async () => {
-      const seq = await this.nextSeq();
-      const line = JSON.stringify({ seq, ...entry }) + "\n";
-      await fs.appendFile(this.journalPath, line, "utf8");
-      this.seenBytes += Buffer.byteLength(line);
-      this.lastSeq = seq;
-      if ((entry.op === "move" || entry.op === "trash") && typeof entry.batch === "string") this.countOp(entry.batch);
-      return seq;
+      const first = await this.nextSeq();
+      const text = entries.map((e, i) => JSON.stringify({ seq: first + i, ...e }) + "\n").join("");
+      await fs.appendFile(this.journalPath, text, "utf8");
+      this.seenBytes += Buffer.byteLength(text);
+      this.lastSeq = first + entries.length - 1;
+      for (const e of entries) if ((e.op === "move" || e.op === "trash") && typeof e.batch === "string") this.countOp(e.batch);
+      return first;
     });
   }
 
@@ -585,22 +614,99 @@ export class Vault {
   }
 
   /**
-   * Marks an operation as in flight until it is journaled. If the process dies between doing it
-   * and writing it down, the marker stays and `recover()` settles it from what is on disk.
+   * Group commit. Writes one inflight marker listing every item, then for each in order runs
+   * `check` and renames src → dst, then journals what was renamed under one lock and in one write.
+   * If the process dies between a rename and the journal write, the marker stays and `recover()`
+   * settles it from what is on disk. The lock is not held during the renames, so other writers
+   * are not blocked by them. `keepGoing` false stops at the first failure (move, trash); true
+   * carries on (undo).
    */
-  private async inflight(marker: { src: string; dst: string; entry: Record<string, unknown> }, fn: () => Promise<void>): Promise<void> {
+  private async group<T extends InflightItem>(items: T[], check: (item: T) => Promise<void>, keepGoing: boolean, onDone?: (item: T) => void): Promise<GroupOutcome> {
+    const out: GroupOutcome = { done: [], errors: [] };
+    if (!items.length) return out;
+    // An item whose destination is already there and whose source is not looks done before
+    // anything ran. recover() must not mistake that for our work, so the marker says so.
+    const marked: InflightItem[] = await Promise.all(items.map(async ({ src, dst, entry }) => {
+      const looksDone = (await exists(dst)) && !(await exists(src));
+      return { src, dst, entry, ...(looksDone ? { looksDone } : {}) };
+    }));
     await fs.mkdir(this.inflightDir, { recursive: true });
     const file = path.join(this.inflightDir, `${Date.now()}-${process.pid}-${randomBytes(3).toString("hex")}.json`);
-    await fs.writeFile(file, JSON.stringify({ pid: process.pid, at: new Date().toISOString(), ...marker }));
-    try {
-      await fn();
-    } catch (e) {
-      // moved but not written down (e.g. the journal lock timed out): keep the marker for recover()
-      const movedUnrecorded = (await exists(marker.dst)) && !(await exists(marker.src));
-      if (!movedUnrecorded) await fs.rm(file, { force: true });
-      throw e;
+    const at = new Date().toISOString();
+    await fs.writeFile(file, JSON.stringify({ pid: process.pid, at, items: marked }));
+    const made = new Set<string>();
+    const tried: number[] = [];   // reached the rename
+    const ats: string[] = [];
+    for (let i = 0; i < items.length; i++) {
+      try {
+        await check(items[i]);
+        tried.push(i);
+        await this.renameInto(items[i].src, items[i].dst, made);
+        out.done.push(i);
+        ats.push(new Date().toISOString());
+        onDone?.(items[i]);
+      } catch (error) {
+        out.errors.push({ i, error });
+        if (!keepGoing) break;
+      }
     }
-    await fs.rm(file, { force: true });
+    if (out.done.length) {
+      try {
+        await this.appendMany(out.done.map((i, k) => ({ ...items[i].entry, at: ats[k] })));
+      } catch (e) {
+        out.journalError = e;
+      }
+    }
+    // renamed but not written down (e.g. the journal lock timed out): keep those in the marker for recover()
+    const unrecorded = new Set(out.journalError === undefined ? tried.filter((i) => !out.done.includes(i)) : tried);
+    const left: InflightItem[] = [];
+    if (unrecorded.size) {
+      const settled = await this.settle(tried.map((i) => marked[i]));
+      tried.forEach((i, k) => { if (unrecorded.has(i) && settled[k] === "done") left.push(marked[i]); });
+    }
+    if (left.length) await fs.writeFile(file, JSON.stringify({ pid: process.pid, at, items: left }));
+    else await fs.rm(file, { force: true });
+    return out;
+  }
+
+  /**
+   * Judges from disk which marker items were carried out. Walks back from the last item and
+   * undoes each done one in a virtual view, so a chain (a→b, then b→c) counts both: b is gone
+   * because the later item moved it on. Items that looked done before the group ran never count.
+   */
+  private async settle(items: InflightItem[]): Promise<("done" | "not-started" | "both-exist" | "missing")[]> {
+    const view = new Map<string, boolean>();
+    const has = async (p: string) => view.get(p) ?? (await exists(p));
+    const result: ("done" | "not-started" | "both-exist" | "missing")[] = new Array(items.length);
+    for (let i = items.length - 1; i >= 0; i--) {
+      const { src: s, dst: d, looksDone } = items[i];
+      const [src, dst] = [await has(s), await has(d)];
+      if (looksDone) result[i] = "not-started";
+      else if (dst && !src) {
+        result[i] = "done";
+        view.set(d, false);
+        view.set(s, true);
+      } else if (src && !dst) result[i] = "not-started";
+      else result[i] = src ? "both-exist" : "missing";
+    }
+    return result;
+  }
+
+  /**
+   * mkdir once per folder per group. A folder made earlier in the group can have been moved away
+   * by a later op of the same group, so ENOENT on a cached folder makes it again and retries once.
+   */
+  private async renameInto(fromAbs: string, toAbs: string, made: Set<string>): Promise<void> {
+    const dir = path.dirname(toAbs);
+    const cached = made.has(dir);
+    if (!cached) { await fs.mkdir(dir, { recursive: true }); made.add(dir); }
+    try {
+      await this.rename(fromAbs, toAbs);
+    } catch (e: any) {
+      if (!cached || e?.code !== "ENOENT") throw e;
+      await fs.mkdir(dir, { recursive: true });
+      await this.rename(fromAbs, toAbs);
+    }
   }
 
   // ── policy ──────────────────────────────────────────────
@@ -646,13 +752,13 @@ export class Vault {
     }
   }
 
-  private async guard(op: "move" | "trash", fromAbs: string, toAbs: string | null, batch?: string): Promise<void> {
-    const p = await this.policy();
+  /** `pending`: ops of this batch already done in the current group but not yet journaled */
+  private async checkPolicy(p: LoadedPolicy, op: "move" | "trash", fromAbs: string, toAbs: string | null, batch: string | undefined, pending: number): Promise<void> {
     await this.assertUnprotected(p, fromAbs);
     if (toAbs) await this.assertUnprotected(p, toAbs);
     if (op === "trash" && p.policy.allowTrash === false) throw new WasnewError("POLICY_DENIED", "trash is turned off by policy");
     const max = p.policy.maxOpsPerBatch;
-    if (batch !== undefined && max !== undefined && (await this.opsInBatch(batch)) >= max) {
+    if (batch !== undefined && max !== undefined && (await this.opsInBatch(batch)) + pending >= max) {
       throw new WasnewError("POLICY_LIMIT", `batch ${batch} reached the policy limit of ${max} operations`);
     }
   }
@@ -661,24 +767,12 @@ export class Vault {
 
   /**
    * Moves and records. Refuses if the destination exists (no overwrite).
-   * Everything that moves files must go through here for undo to be complete.
+   * Everything that moves files must go through here (or moveMany) for undo to be complete.
    * Pass `batch` to group moves for `undo({ batch })`, and `by` to say who and why.
    */
   async move(fromRel: string, toRel: string, batch?: string, by?: Actor): Promise<void> {
-    const fromAbs = this.resolveSource(fromRel);   // the source may be outside the root
-    const toAbs = this.resolveInside(toRel);       // the destination never is
-    // `Report.PDF` → `Report.pdf` looks like "already exists" on Windows/macOS but is the same file — let the rename through
-    const caseOnly = fromAbs !== toAbs && fromAbs.toLowerCase() === toAbs.toLowerCase();
-    if (!caseOnly && (await exists(toAbs))) {
-      throw new WasnewError("DEST_EXISTS", "destination already exists: " + toRel, toRel);
-    }
-    await this.guard("move", fromAbs, toAbs, batch);
-    await fs.mkdir(path.dirname(toAbs), { recursive: true });
-    const entry = { op: "move", from: toPosix(fromRel), to: toPosix(toRel), ...(batch ? { batch } : {}), ...(by ? { by } : {}) };
-    await this.inflight({ src: fromAbs, dst: toAbs, entry }, async () => {
-      await this.rename(fromAbs, toAbs);
-      await this.append({ ...entry, at: new Date().toISOString() });
-    });
+    const r = await this.perform([{ op: "move", from: fromRel, to: toRel }], batch, by);
+    if (r.failed) throw r.error;
   }
 
   /**
@@ -687,20 +781,78 @@ export class Vault {
    * Returns where it went, relative to the store.
    */
   async trash(rel: string, batch?: string, by?: Actor): Promise<string> {
-    const fromAbs = this.resolveInside(rel);
-    if (fromAbs === this.root) throw new WasnewError("POLICY_DENIED", "cannot trash the whole folder");
-    if (!(await exists(fromAbs))) throw new WasnewError("NOT_FOUND", "no such file: " + rel, rel);
-    await this.guard("trash", fromAbs, null, batch);
-    const from = toPosix(path.relative(this.root, fromAbs));
-    const to = `trash/${snapshotId(new Date().toISOString())}/${from}`;
-    const toAbs = path.join(this.store, to);
-    await fs.mkdir(path.dirname(toAbs), { recursive: true });
-    const entry = { op: "trash", from, to, ...(batch ? { batch } : {}), ...(by ? { by } : {}) };
-    await this.inflight({ src: fromAbs, dst: toAbs, entry }, async () => {
-      await this.rename(fromAbs, toAbs);
-      await this.append({ ...entry, at: new Date().toISOString() });
-    });
-    return to;
+    const r = await this.perform([{ op: "trash", path: rel }], batch, by);
+    if (r.failed) throw r.error;
+    return r.trashed[0];
+  }
+
+  /** Many moves in order, committed in groups. Stops at the first failure; what was done before it stays journaled. */
+  async moveMany(moves: { from: string; to: string }[], batch?: string, by?: Actor): Promise<ManyResult> {
+    const r = await this.perform(moves.map((m) => ({ op: "move" as const, from: m.from, to: m.to })), batch, by);
+    return { done: r.done, ...(r.failed ? { failed: r.failed } : {}) };
+  }
+
+  /** Many trashes in order, committed in groups. Stops at the first failure. */
+  async trashMany(paths: string[], batch?: string, by?: Actor): Promise<ManyResult> {
+    const r = await this.perform(paths.map((p) => ({ op: "trash" as const, path: p })), batch, by);
+    return { done: r.done, trashed: r.trashed, ...(r.failed ? { failed: r.failed } : {}) };
+  }
+
+  /**
+   * Runs moves and trashes in order, GROUP_SIZE at a time, and stops at the first failure.
+   * Each op is checked right before its rename (destination taken, source missing, policy), so it
+   * sees the folder as the earlier ops of the call left it and nothing is ever overwritten.
+   */
+  private async perform(ops: PlanOp[], batch?: string, by?: Actor): Promise<{ done: number; trashed: string[]; failed?: OpFailure; error?: unknown }> {
+    let done = 0;
+    const trashed: string[] = [];
+    const fail = (index: number, error: unknown) => ({ done, trashed, failed: failure(index, error), error });
+    for (let start = 0; start < ops.length; start += GROUP_SIZE) {
+      const chunk = ops.slice(start, start + GROUP_SIZE);
+      // resolve paths first (no disk access) so the marker can list the whole group
+      const items: PerformItem[] = [];
+      let bad: { index: number; error: unknown } | undefined;
+      for (let k = 0; k < chunk.length; k++) {
+        const op = chunk[k];
+        try {
+          if (op.op === "move") {
+            const src = this.resolveSource(op.from);   // the source may be outside the root
+            const dst = this.resolveInside(op.to);     // the destination never is
+            // `Report.PDF` → `Report.pdf` looks like "already exists" on Windows/macOS but is the same file, so let the rename through
+            const caseOnly = src !== dst && src.toLowerCase() === dst.toLowerCase();
+            const entry = { op: "move", from: toPosix(op.from), to: toPosix(op.to), ...(batch ? { batch } : {}), ...(by ? { by } : {}) };
+            items.push({ kind: "move", src, dst, entry, caseOnly, rel: op.to });
+          } else {
+            const src = this.resolveInside(op.path);
+            if (src === this.root) throw new WasnewError("POLICY_DENIED", "cannot trash the whole folder");
+            const from = toPosix(path.relative(this.root, src));
+            const to = `trash/${snapshotId(new Date().toISOString())}/${from}`;
+            const entry = { op: "trash", from, to, ...(batch ? { batch } : {}), ...(by ? { by } : {}) };
+            items.push({ kind: "trash", src, dst: path.join(this.store, to), entry, caseOnly: false, rel: op.path, storeTo: to });
+          }
+        } catch (error) {
+          bad = { index: start + k, error };
+          break;
+        }
+      }
+      let policy: LoadedPolicy | undefined;
+      let pending = 0;
+      const out = await this.group(items, async (item) => {
+        if (item.kind === "move") {
+          if (!item.caseOnly && (await exists(item.dst))) throw new WasnewError("DEST_EXISTS", "destination already exists: " + item.rel, item.rel);
+        } else if (!(await exists(item.src))) {
+          throw new WasnewError("NOT_FOUND", "no such file: " + item.rel, item.rel);
+        }
+        policy ??= await this.policy();   // once per group, read when the first op gets this far
+        await this.checkPolicy(policy, item.kind, item.src, item.kind === "move" ? item.dst : null, batch, pending);
+      }, false, () => { pending++; });
+      if (out.journalError !== undefined) return fail(start + out.done[0], out.journalError);
+      done += out.done.length;
+      for (const i of out.done) if (items[i].storeTo) trashed.push(items[i].storeTo!);
+      if (out.errors.length) return fail(start + out.errors[0].i, out.errors[0].error);
+      if (bad) return fail(bad.index, bad.error);
+    }
+    return { done, trashed };
   }
 
   /**
@@ -789,39 +941,38 @@ export class Vault {
     const targets = (opts.batch === undefined ? active : active.filter((m) => m.batch === opts.batch)).slice(-count).reverse();
     const undone: MoveRecord[] = [];
     const skipped: UndoSkip[] = [];
-    for (const m of targets) {
-      const skip = (reason: string, message: string) => skipped.push({ ...record(m), reason, message });
-      let toAbs: string, fromAbs: string;
-      try {
-        toAbs = m.op === "trash" ? this.trashPath(m.to) : this.resolveInside(m.to);
-        fromAbs = m.op === "trash" ? this.resolveInside(m.from) : this.resolveSource(m.from);   // what came from a source goes back to it
-      } catch (e: any) {
-        skip(e?.code ?? "INVALID", String(e?.message ?? e));
-        continue;
+    for (let start = 0; start < targets.length; start += GROUP_SIZE) {
+      const chunk = targets.slice(start, start + GROUP_SIZE);
+      const items: UndoItem[] = [];
+      const skips = new Map<Movement, { reason: string; message: string }>();
+      const why = (e: any, fallback: string) => ({ reason: e?.code ?? fallback, message: String(e?.message ?? e) });
+      for (const m of chunk) {
+        try {
+          const moved = m.op === "trash" ? this.trashPath(m.to) : this.resolveInside(m.to);
+          const origin = m.op === "trash" ? this.resolveInside(m.from) : this.resolveSource(m.from);   // what came from a source goes back to it
+          const caseOnly = origin !== moved && origin.toLowerCase() === moved.toLowerCase();   // a case-only rename: the original place is the file itself
+          items.push({ m, src: moved, dst: origin, caseOnly, entry: { op: "undo", of: m.seq, ...(opts.by ? { by: opts.by } : {}) } });
+        } catch (e) {
+          skips.set(m, why(e, "INVALID"));
+        }
       }
-      const caseOnly = fromAbs !== toAbs && fromAbs.toLowerCase() === toAbs.toLowerCase();   // a case-only rename: the original place is the file itself
-      if (!caseOnly && (await exists(fromAbs))) {
-        skip("ORIGIN_OCCUPIED", "something now exists at the original place: " + m.from);
-        continue;
+      const out = await this.group(items, async (item) => {
+        if (!item.caseOnly && (await exists(item.dst))) throw { code: "ORIGIN_OCCUPIED", message: "something now exists at the original place: " + item.m.from };
+        if (!(await exists(item.src))) throw { code: "MISSING", message: "the moved file is no longer there: " + item.m.to };
+      }, true);
+      for (const { i, error } of out.errors) skips.set(items[i].m, why(error, "ERROR"));
+      const journaled = out.journalError === undefined ? out.done : [];
+      if (out.journalError !== undefined) for (const i of out.done) skips.set(items[i].m, why(out.journalError, "ERROR"));
+      const ok = new Set(journaled.map((i) => items[i].m));
+      for (const m of chunk) {
+        if (ok.has(m)) undone.push(record(m));
+        else skipped.push({ ...record(m), ...skips.get(m)! });
       }
-      if (!(await exists(toAbs))) {
-        skip("MISSING", "the moved file is no longer there: " + m.to);
-        continue;
-      }
-      try {
-        await fs.mkdir(path.dirname(fromAbs), { recursive: true });
-        const entry = { op: "undo", of: m.seq, ...(opts.by ? { by: opts.by } : {}) };
-        await this.inflight({ src: toAbs, dst: fromAbs, entry }, async () => {
-          await this.rename(toAbs, fromAbs);
-          await this.append({ ...entry, at: new Date().toISOString() });
-        });
-      } catch (e: any) {
-        skip(e?.code ?? "ERROR", String(e?.message ?? e));
-        continue;
-      }
-      undone.push(record(m));
-      // folders the move created go away once empty
-      await this.pruneEmptyDirs(path.dirname(toAbs), m.op === "trash" ? this.trashDir : this.root);
+      // folders the moves created go away once empty: each folder once, deepest first
+      const dirs = new Map<string, string>();
+      for (const i of journaled) dirs.set(path.dirname(items[i].src), items[i].m.op === "trash" ? this.trashDir : this.root);
+      const deepestFirst = [...dirs].sort((a, b) => b[0].split(path.sep).length - a[0].split(path.sep).length);
+      for (const [dir, stopAt] of deepestFirst) await this.pruneEmptyDirs(dir, stopAt);
     }
     return { undone, skipped };
   }
@@ -959,19 +1110,7 @@ export class Vault {
     if (fresh.length) throw new WasnewError("PLAN_INVALID", `the folder changed since the plan: ${fresh[0].code} at operation ${fresh[0].index}`);
     const batch = opts.batch ?? "plan-" + id;
     const by = opts.by ?? plan.by;
-    let done = 0;
-    let failed: ApplyResult["failed"];
-    for (let index = 0; index < plan.ops.length; index++) {
-      const op = plan.ops[index];
-      try {
-        if (op.op === "move") await this.move(op.from, op.to, batch, by);
-        else await this.trash(op.path, batch, by);
-        done++;
-      } catch (e: any) {
-        failed = { index, code: e?.code ?? "ERROR", message: String(e?.message ?? e) };
-        break;
-      }
-    }
+    const { done, failed } = await this.perform(plan.ops, batch, by);
     plan.applied = { at: new Date().toISOString(), batch };
     await fs.writeFile(this.planPath(id), JSON.stringify(plan, null, 1), "utf8");
     await this.append({ op: "apply", plan: id, batch, done, at: plan.applied.at, ...(by ? { by } : {}) });
@@ -1011,41 +1150,38 @@ export class Vault {
   }
 
   /**
-   * Settles operations a crashed process left half-recorded. A marker whose destination exists
-   * and source doesn't was done but not journaled — it gets journaled now, so undo knows about it.
+   * Settles operations a crashed process left half-recorded. A marker item whose destination
+   * exists and source doesn't was done but not journaled; it gets journaled now, so undo knows
+   * about it. Reads both marker formats: one op (`src`, `dst`, `entry`) and a group (`items`).
    * Markers younger than `minAgeMs` may belong to a live process and are left alone.
    */
   async recover(opts: { minAgeMs?: number } = {}): Promise<RecoverItem[]> {
     const minAge = opts.minAgeMs ?? 30_000;
-    const items: RecoverItem[] = [];
+    const result: RecoverItem[] = [];
     for (const name of await fs.readdir(this.inflightDir).catch(() => [] as string[])) {
       const file = path.join(this.inflightDir, name);
-      let marker: { at: string; src: string; dst: string; entry: Record<string, unknown> & { op: string } };
+      let marker: { at: string; items?: InflightItem[] } & Partial<InflightItem>;
+      let items: InflightItem[];
       try {
         marker = JSON.parse(await fs.readFile(file, "utf8"));
+        items = Array.isArray(marker.items) ? marker.items : [{ src: marker.src!, dst: marker.dst!, entry: marker.entry! }];
+        if (!items.every((it) => typeof it?.src === "string" && typeof it.dst === "string" && typeof it.entry?.op === "string")) throw new Error("bad marker");
       } catch {
         await fs.rm(file, { force: true });
         continue;
       }
-      const show = { op: marker.entry.op, from: this.relInside(marker.src) ?? marker.src, to: this.relInside(marker.dst) ?? marker.dst };
+      const show = (it: InflightItem) => ({ op: it.entry.op, from: this.relInside(it.src) ?? it.src, to: this.relInside(it.dst) ?? it.dst });
       if (Date.now() - (await fs.stat(file)).mtimeMs < minAge) {
-        items.push({ ...show, outcome: "in-progress" });
+        for (const it of items) result.push({ ...show(it), outcome: "in-progress" });
         continue;
       }
-      const [src, dst] = [await exists(marker.src), await exists(marker.dst)];
-      let outcome: RecoverItem["outcome"];
-      if (dst && !src) {
-        await this.append({ ...marker.entry, at: marker.at, recovered: true });
-        outcome = "journaled";
-      } else if (src && !dst) {
-        outcome = "not-started";
-      } else {
-        outcome = src ? "both-exist" : "missing";
-      }
+      const settled = await this.settle(items);
+      const done = items.filter((_, i) => settled[i] === "done");
+      if (done.length) await this.appendMany(done.map((it) => ({ ...it.entry, at: marker.at, recovered: true })));
       await fs.rm(file, { force: true });
-      items.push({ ...show, outcome });
+      items.forEach((it, i) => result.push({ ...show(it), outcome: settled[i] === "done" ? "journaled" : settled[i] }));
     }
-    return items;
+    return result;
   }
 }
 

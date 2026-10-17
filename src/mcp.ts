@@ -7,7 +7,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
-import { openVault, type Actor, type Diff, type PlanOp, type Vault } from "./index.js";
+import { openVault, type Actor, type Diff, type ManyResult, type PlanOp, type Vault } from "./index.js";
 import { WasnewError, isWasnewError } from "./errors.js";
 
 export const VERSION = "0.3.0";
@@ -50,6 +50,35 @@ async function gate(v: Vault, n: number): Promise<void> {
   if (limit !== undefined && n > limit) {
     throw new WasnewError("NEEDS_APPROVAL", `${n} operations is more than this folder allows without approval (${limit}); propose them with wasnew_plan and ask the user to approve`);
   }
+}
+
+/**
+ * The tools report every failure and carry on with the rest, while moveMany and trashMany stop at
+ * the first one. Runs the list in stretches, restarting after each failure. Returns how many were done.
+ */
+async function keepGoing<T>(
+  list: T[],
+  many: (items: T[]) => Promise<ManyResult>,
+  onFail: (item: T, code: string, message: string) => void,
+  refuse: (item: T) => WasnewError | undefined = () => undefined,
+): Promise<number> {
+  let done = 0;
+  let i = 0;
+  while (i < list.length) {
+    const refused = refuse(list[i]);
+    if (refused) {
+      onFail(list[i], refused.code, refused.message);
+      i++;
+      continue;
+    }
+    let end = i + 1;
+    while (end < list.length && !refuse(list[end])) end++;
+    const r = await many(list.slice(i, end));
+    done += r.done;
+    if (r.failed) onFail(list[i + r.failed.index], r.failed.code, r.failed.message);
+    i += r.failed ? r.failed.index + 1 : end - i;
+  }
+  return done;
 }
 
 function newBatchId(): string {
@@ -117,21 +146,14 @@ const TOOLS: Tool[] = [
       await gate(v, a.moves.length);
       const batch: string = a.batch ?? newBatchId();
       const by = actor(ctx, a);
-      const moved: { from: string; to: string }[] = [];
       const failed: { from: string; to: string; code: string; message: string }[] = [];
-      for (const m of a.moves as { from: string; to: string }[]) {
-        try {
-          const abs = path.resolve(ctx.root, m.from);
-          if (!ctx.allowOutsideSources && abs !== ctx.root && !abs.startsWith(ctx.root + path.sep)) {
-            throw new WasnewError("OUTSIDE_ROOT", "source is outside the folder: " + m.from, m.from);
-          }
-          await v.move(m.from, m.to, batch, by);
-          moved.push(m);
-        } catch (e: any) {
-          failed.push({ ...m, code: e?.code ?? "ERROR", message: String(e?.message ?? e) });
-        }
-      }
-      return { result: { batch, moved: moved.length, failed } };
+      const outside = (m: { from: string }) => {
+        const abs = path.resolve(ctx.root, m.from);
+        if (ctx.allowOutsideSources || abs === ctx.root || abs.startsWith(ctx.root + path.sep)) return undefined;
+        return new WasnewError("OUTSIDE_ROOT", "source is outside the folder: " + m.from, m.from);
+      };
+      const moved = await keepGoing(a.moves as { from: string; to: string }[], (list) => v.moveMany(list, batch, by), (m, code, message) => failed.push({ ...m, code, message }), outside);
+      return { result: { batch, moved, failed } };
     },
   },
   {
@@ -154,17 +176,9 @@ const TOOLS: Tool[] = [
       await gate(v, a.paths.length);
       const batch: string = a.batch ?? newBatchId();
       const by = actor(ctx, a);
-      const trashed: string[] = [];
       const failed: { path: string; code: string; message: string }[] = [];
-      for (const p of a.paths as string[]) {
-        try {
-          await v.trash(p, batch, by);
-          trashed.push(p);
-        } catch (e: any) {
-          failed.push({ path: p, code: e?.code ?? "ERROR", message: String(e?.message ?? e) });
-        }
-      }
-      return { result: { batch, trashed: trashed.length, failed } };
+      const trashed = await keepGoing(a.paths as string[], (list) => v.trashMany(list, batch, by), (p, code, message) => failed.push({ path: p, code, message }));
+      return { result: { batch, trashed, failed } };
     },
   },
   {

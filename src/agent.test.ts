@@ -196,3 +196,143 @@ describe("recover", () => {
     expect(await fs.readdir(path.join(root, ".wasnew", "inflight"))).toEqual([]);
   });
 });
+
+describe("group commit", () => {
+  const files = async (n: number) => {
+    for (let i = 0; i < n; i++) {
+      await fs.mkdir(path.join(root, "in", `d${i % 10}`), { recursive: true });
+      await fs.writeFile(path.join(root, "in", `d${i % 10}`, `f${i}.txt`), `${i}\n`);
+    }
+    return Array.from({ length: n }, (_, i) => ({ from: `in/d${i % 10}/f${i}.txt`, to: `sorted/x${i % 7}/y${i % 3}/f${i}.txt` }));
+  };
+  const movesOf = async (v: Awaited<ReturnType<typeof openVault>>, batch: string) =>
+    (await v.readJournal()).filter((e) => e.op === "move" && (e as any).batch === batch);
+  const inflight = () => fs.readdir(path.join(root, ".wasnew", "inflight")).catch(() => []);
+
+  it("moves 600 files in one call with consecutive seqs; undo brings all back and prunes empty folders", async () => {
+    const moves = await files(600);
+    const v = await openVault(root);
+    await v.note("before");
+    expect(await v.moveMany(moves, "g")).toEqual({ done: 600 });
+    const seqs = (await movesOf(v, "g")).map((e) => e.seq);
+    expect(seqs).toHaveLength(600);
+    expect(seqs.every((s, i) => i === 0 || s === seqs[i - 1] + 1)).toBe(true);
+    expect(await read("sorted/x3/y1/f10.txt")).toBe("10\n");
+    expect(await inflight()).toEqual([]);
+
+    const r = await v.undo({ batch: "g" });
+    expect(r.undone).toHaveLength(600);
+    expect(r.skipped).toHaveLength(0);
+    for (const i of [0, 299, 599]) expect(await read(`in/d${i % 10}/f${i}.txt`)).toBe(`${i}\n`);
+    await gone("sorted");
+    expect(await v.pendingMoves("g")).toEqual([]);
+  });
+
+  it("stops at a taken destination mid-group; what came before is on disk, journaled and undoable", async () => {
+    const moves = await files(600);
+    await fs.mkdir(path.dirname(path.join(root, moves[299].to)), { recursive: true });
+    await fs.writeFile(path.join(root, moves[299].to), "already here\n");
+    const v = await openVault(root);
+    const r = await v.moveMany(moves, "g");
+    expect(r.done).toBe(299);
+    expect(r.failed).toMatchObject({ index: 299, code: "DEST_EXISTS" });
+    expect(await movesOf(v, "g")).toHaveLength(299);
+    expect(await read(moves[298].to)).toBe("298\n");
+    expect(await read(moves[299].from)).toBe("299\n");
+    expect(await read(moves[299].to)).toBe("already here\n");
+    expect(await read(moves[300].from)).toBe("300\n");
+    expect(await inflight()).toEqual([]);
+
+    expect((await v.undo({ batch: "g" })).undone).toHaveLength(299);
+    expect(await read(moves[0].from)).toBe("0\n");
+    expect(await read(moves[299].to)).toBe("already here\n");
+  });
+
+  it("counts ops done earlier in the same call against maxOpsPerBatch", async () => {
+    const moves = await files(10);
+    const v = await openVault(root);
+    await setPolicy({ maxOpsPerBatch: 4 });
+    const r = await v.moveMany(moves, "g");
+    expect(r.done).toBe(4);
+    expect(r.failed).toMatchObject({ index: 4, code: "POLICY_LIMIT" });
+    expect(await read(moves[4].from)).toBe("4\n");
+  });
+
+  it("checks each op against what earlier ops of the call did", async () => {
+    const v = await openVault(root);
+    const r = await v.moveMany([
+      { from: "a.txt", to: "x/a.txt" },
+      { from: "docs/b.md", to: "x/a.txt" },   // would overwrite the file moved just before
+    ], "g");
+    expect(r).toMatchObject({ done: 1, failed: { index: 1, code: "DEST_EXISTS" } });
+    expect(await read("x/a.txt")).toBe("hello\n");
+    expect(await read("docs/b.md")).toBe("# b\n");
+  });
+
+  it("trashMany sets many aside and undo puts them back", async () => {
+    const moves = await files(300);
+    const v = await openVault(root);
+    const r = await v.trashMany(moves.map((m) => m.from), "t");
+    expect(r.done).toBe(300);
+    expect(r.trashed).toHaveLength(300);
+    expect(r.failed).toBeUndefined();
+    expect(await fs.readFile(path.join(root, ".wasnew", r.trashed![7]), "utf8")).toBe("7\n");
+    await gone(moves[7].from);
+    expect((await v.undo({ batch: "t" })).undone).toHaveLength(300);
+    expect(await read(moves[7].from)).toBe("7\n");
+    expect(await fs.readdir(path.join(root, ".wasnew", "trash"))).toEqual([]);
+  });
+
+  it("recover reads a group marker and journals only the items that happened", async () => {
+    const v = await openVault(root);
+    const moves = await files(6);
+    await fs.mkdir(path.join(root, "out"));
+    const items = moves.map((m, i) => ({ src: path.join(root, m.from), dst: path.join(root, "out", `f${i}.txt`), entry: { op: "move", from: m.from, to: `out/f${i}.txt`, batch: "crashed" } }));
+    // the process renamed the first three and died before the journal write
+    for (const it of items.slice(0, 3)) await fs.rename(it.src, it.dst);
+    // a chain inside the group: a.txt → out/a1.txt → out/a2.txt, both done
+    await fs.rename(path.join(root, "a.txt"), path.join(root, "out", "a2.txt"));
+    items.push(
+      { src: path.join(root, "a.txt"), dst: path.join(root, "out", "a1.txt"), entry: { op: "move", from: "a.txt", to: "out/a1.txt", batch: "crashed" } },
+      { src: path.join(root, "out", "a1.txt"), dst: path.join(root, "out", "a2.txt"), entry: { op: "move", from: "out/a1.txt", to: "out/a2.txt", batch: "crashed" } },
+    );
+    const dir = path.join(root, ".wasnew", "inflight");
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, "g.json"), JSON.stringify({ pid: 1, at: "2026-10-02T00:00:00.000Z", items }));
+    // the old one-op format next to it
+    await fs.rename(path.join(root, "docs", "b.md"), path.join(root, "b.md"));
+    await fs.writeFile(path.join(dir, "old.json"), JSON.stringify({ pid: 1, at: "2026-10-02T00:00:00.000Z", src: path.join(root, "docs", "b.md"), dst: path.join(root, "b.md"), entry: { op: "move", from: "docs/b.md", to: "b.md", batch: "old" } }));
+    const old = new Date(Date.now() - 60_000);
+    for (const n of ["g.json", "old.json"]) await fs.utimes(path.join(dir, n), old, old);
+
+    const r = await v.recover();
+    expect(r.map((i) => i.outcome)).toEqual(expect.arrayContaining(["journaled", "not-started"]));
+    expect(r.filter((i) => i.outcome === "journaled")).toHaveLength(6);
+    expect(r.filter((i) => i.outcome === "not-started")).toHaveLength(3);
+    expect(await v.pendingMoves("crashed")).toHaveLength(5);
+    expect(await v.pendingMoves("old")).toHaveLength(1);
+    expect(await fs.readdir(dir)).toEqual([]);
+
+    expect((await v.undo({ batch: "crashed" })).undone).toHaveLength(5);
+    expect(await read("a.txt")).toBe("hello\n");
+    expect(await read(moves[2].from)).toBe("2\n");
+    await v.undo({ batch: "old" });
+    expect(await read("docs/b.md")).toBe("# b\n");
+  });
+
+  it("recover skips marker items that looked done before the group ran", async () => {
+    const v = await openVault(root);
+    // a group listing a move whose destination already existed and whose source did not;
+    // it would have failed with DEST_EXISTS, so recover must not journal it
+    await fs.writeFile(path.join(root, "taken.txt"), "someone else\n");
+    const dir = path.join(root, ".wasnew", "inflight");
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, "g.json"), JSON.stringify({ pid: 1, at: "x", items: [
+      { src: path.join(root, "ghost.txt"), dst: path.join(root, "taken.txt"), entry: { op: "move", from: "ghost.txt", to: "taken.txt" }, looksDone: true },
+    ] }));
+    const old = new Date(Date.now() - 60_000);
+    await fs.utimes(path.join(dir, "g.json"), old, old);
+    expect((await v.recover()).map((i) => i.outcome)).toEqual(["not-started"]);
+    expect(await v.pendingMoves()).toEqual([]);
+  });
+});
