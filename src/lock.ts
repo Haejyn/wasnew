@@ -18,7 +18,8 @@ export async function withLock<T>(lockPath: string, fn: () => Promise<T>, opts: 
       await handle.close();
       break;
     } catch (e: any) {
-      if (e?.code !== "EEXIST") throw e;
+      // Windows answers EPERM while the previous holder's lock file is still being deleted
+      if (e?.code !== "EEXIST" && !(e?.code === "EPERM" && process.platform === "win32")) throw e;
       const age = await fs.stat(lockPath).then((st) => Date.now() - st.mtimeMs, () => 0);
       if (age > staleMs) { await fs.rm(lockPath, { force: true }); continue; }
       if (Date.now() - started > timeoutMs) throw new WasnewError("LOCKED", "journal is locked by another process: " + lockPath);
