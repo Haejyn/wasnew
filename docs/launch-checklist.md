@@ -4,13 +4,13 @@ Things that happen outside the repo. Check them off in order.
 
 ## GitHub repo settings
 
-- [ ] Description (About):
+- [x] Description (About):
   `Undo layer for AI agents' file operations. Journals every move, rename and delete an agent makes in any folder and undoes them per task, with or without git. MCP server, CLI, library.`
-- [ ] Website: `https://github.com/Haejyn/wasnew#readme` (or the npm page after publishing)
-- [ ] Topics (20, GitHub's limit):
+- [x] Website: `https://github.com/Haejyn/wasnew#readme` (or the npm page after publishing)
+- [x] Topics (20, GitHub's limit):
   `ai-agent` `undo` `mcp` `mcp-server` `model-context-protocol` `claude-code` `claude` `rollback` `checkpoint` `trash` `safe-delete` `file-operations` `journal` `snapshot` `agent-safety` `ai-safety` `llm` `cli` `nodejs` `typescript`
 - [ ] Social preview image (Settings → General): icon on a plain background with the one-line definition
-- [ ] Merge `docs/launch` into `main` so the llms.txt and README links (which point at `main`) resolve
+- [x] Merge `docs/launch` into `main` so the llms.txt and README links (which point at `main`) resolve
 - [ ] Check that CITATION.cff shows the "Cite this repository" button
 
 ## npm publish
@@ -39,7 +39,13 @@ Things that happen outside the repo. Check them off in order.
 - [ ] Show HN, title: `Show HN: Wasnew, undo for files an AI agent moved or deleted`
   First comment: the Claude Code docs quote on bash changes, the benchmark table, and the row wasnew loses
 - [ ] r/ClaudeAI (and r/ClaudeCode): GIF first, then the quick start
-- [ ] Official MCP Registry (registry.modelcontextprotocol.io): needs the npm package first; follow its publisher CLI steps (`server.json`, `mcpName` in package.json)
+- [ ] Official MCP Registry (registry.modelcontextprotocol.io), after `npm publish`. `server.json` and `mcpName` in package.json are ready (`io.github.Haejyn/wasnew`); bump the version in both when package.json changes
+  1. Install the publisher CLI: `brew install mcp-publisher`, or on Windows (PowerShell):
+     `$arch = if ([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -eq "Arm64") { "arm64" } else { "amd64" }; Invoke-WebRequest -Uri "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_windows_$arch.tar.gz" -OutFile "mcp-publisher.tar.gz"; tar xf mcp-publisher.tar.gz mcp-publisher.exe; rm mcp-publisher.tar.gz`
+     then move `mcp-publisher.exe` to a folder on PATH and check with `mcp-publisher --help`
+  2. `mcp-publisher login github` (sign in as `Haejyn`; the name prefix is case sensitive)
+  3. `mcp-publisher publish` from the repo root
+  4. Check: `curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.Haejyn/wasnew"`
 - [ ] glama.ai MCP server directory: submit the GitHub URL
 - [ ] mcpmarket.com: submit the GitHub URL
 - [ ] awesome-mcp-servers lists: open a PR under the file system or developer tools category

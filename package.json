@@ -2,6 +2,7 @@
   "name": "wasnew",
   "version": "0.3.0",
   "description": "Undo layer for AI agents' file operations: journals every move, rename and delete in any folder and undoes them per task, with or without git.",
+  "mcpName": "io.github.Haejyn/wasnew",
   "private": true,
   "type": "module",
   "author": "Haejyn",

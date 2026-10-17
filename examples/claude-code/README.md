@@ -1,33 +1,35 @@
-# Claude Code 와 함께 쓰기
+# Using wasnew with Claude Code
 
-에이전트 체크포인트는 에이전트가 편집한 파일만 되돌립니다. 셸에서 실행한 `rm` · `mv` 와 git 밖 폴더는 이 예제가 맡습니다.
+English | [한국어](README.ko.md)
 
-## 1. MCP 서버 붙이기
+Claude Code checkpoints only undo edits made by its file tools. This example covers shell `rm` and `mv` and folders outside git.
+
+## 1. Add the MCP server
 
 ```bash
 claude mcp add --transport stdio wasnew -- node /path/to/wasnew/bin/wasnew.js mcp --root ~/Downloads
 ```
 
-## 2. 훅 세 개 (`settings.json`)
+## 2. Three hooks (`settings.json`)
 
-| 훅 | 하는 일 |
+| Hook | What it does |
 |---|---|
-| `UserPromptSubmit` | 요청을 보낼 때마다 `$WASNEW_ROOT` 폴더를 스냅샷(`--if-changed`면 바뀐 게 없을 때 건너뜀). 안 바뀐 파일은 다시 읽지 않아 빠름 |
-| `PreToolUse` · `Bash` | [`guard.mjs`](guard.mjs) 가 `rm` · `mv` · `del` · `Remove-Item` · `git clean` · `git reset --hard` · `find -delete` 를 막고, 대신 `wasnew_trash` · `wasnew_move` 를 쓰라고 에이전트에게 돌려줌 |
-| `PreToolUse` · `Read` · `Edit` | [`moved.mjs`](moved.mjs) 가 없는 파일을 열려고 할 때 저널에 옮겨진 기록이 있으면 막고 새 경로를 알려 줌. 휴지통에 있으면 되돌릴 batch 를 알려 줌. 새 파일을 만드는 `Write` 는 늘 통과. 파일이 있거나 기록이 없으면 그냥 통과 |
+| `UserPromptSubmit` | Snapshots `$WASNEW_ROOT` on every prompt. `--if-changed` skips it when nothing changed, and unchanged files are not read again. |
+| `PreToolUse`, matcher `Bash` | [`guard.mjs`](guard.mjs) blocks `rm`, `mv`, `del`, `Remove-Item`, `git rm`, `git mv`, `git clean`, `git reset --hard`, `find -delete` and similar, and tells the agent to use `wasnew_trash` or `wasnew_move` instead. |
+| `PreToolUse`, matcher `Read\|Edit\|MultiEdit` | [`moved.mjs`](moved.mjs) checks a file that no longer exists against the journal. If it moved, the call is blocked and the agent gets the new path. If it is in the trash, the agent gets the batch to undo. If the file exists or the journal has no record, the call goes through. |
 
-[`settings.json`](settings.json) 의 경로를 바꿔 `~/.claude/settings.json` 이나 프로젝트의 `.claude/settings.json` 에 합치세요. `WASNEW_ROOT` 는 지킬 폴더입니다.
-Windows 에서는 훅 명령이 PowerShell 로 돌아 `$WASNEW_ROOT` 가 펼쳐지지 않습니다. 폴더 경로를 직접 적으세요.
+Replace `/path/to/wasnew` in [`settings.json`](settings.json) and merge it into `~/.claude/settings.json` or a project's `.claude/settings.json`. Set `WASNEW_ROOT` to the folder to protect.
+On Windows, hook commands run in PowerShell and `$WASNEW_ROOT` is not expanded. Write the folder path in the command directly.
 
-## 3. 큰 작업은 승인 받기
+## 3. Require approval for large changes
 
-`<폴더>/.wasnew/policy.json`:
+`<folder>/.wasnew/policy.json`:
 
 ```json
 { "protect": ["Taxes/", "*.key"], "requireApprovalOver": 20, "maxOpsPerBatch": 1000 }
 ```
 
-20개가 넘는 이동 · 휴지통은 에이전트가 `wasnew_plan` 으로 제안만 할 수 있습니다. 터미널에서 확인하고 승인합니다:
+With this policy, more than 20 moves or trashes in one call are refused, and the agent can only propose them with `wasnew_plan`. Review and approve in a terminal:
 
 ```bash
 wasnew plans
@@ -35,9 +37,9 @@ wasnew show <id>
 wasnew approve <id>
 ```
 
-그다음 에이전트가 `wasnew_apply` 로 실행합니다. 승인 도구는 MCP 에 없어서 에이전트가 스스로 승인할 수 없습니다.
+Then the agent runs it with `wasnew_apply`. The MCP server has no approve tool, so the agent cannot approve its own plan.
 
-## 제한
+## Limits
 
-- `guard.mjs` 는 명령 문자열을 패턴으로 봅니다. 스크립트 파일 안에서 지우거나 다른 언어로 지우는 것은 못 막습니다. 그래서 스냅샷 훅을 같이 쓰고, 더 촘촘히 지키려면 `wasnew watch --root <폴더>` 를 따로 띄워 둡니다
-- 정책 파일은 wasnew 도구로는 고칠 수 없지만, 에이전트가 다른 편집 도구로 고치는 것까지 막지는 않습니다
+- `guard.mjs` matches the command text. It does not catch deletes inside a script file or in another language. Keep the snapshot hook, and for closer coverage run `wasnew watch --root <folder>` separately.
+- wasnew tools cannot edit the policy file, but nothing stops the agent from editing it with another tool.
