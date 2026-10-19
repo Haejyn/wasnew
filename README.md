@@ -128,22 +128,22 @@ Media: 8 files × 256 MB of random (incompressible) data
 
 | Step | wasnew | git | git (no compression) |
 |---|---:|---:|---:|
-| First snapshot | 4,348 | 71,588 | 23,543 |
-| Re-snapshot, nothing changed | 2 | 44 | 43 |
-| Reorganize (move every file into subfolders) | 11 | 11,458 | 11,732 |
-| Undo reorganize | 12 | 8,667 | 8,714 |
-| Trash 10% + undo | 9 | 2,328 | 2,351 |
+| First snapshot | 4,348 ms (4.3 s) | 71,588 ms (71.6 s) | 23,543 ms (23.5 s) |
+| Re-snapshot, nothing changed | 2 ms | 44 ms | 43 ms |
+| Reorganize (move every file into subfolders) | 11 ms | 11,458 ms (11.5 s) | 11,732 ms (11.7 s) |
+| Undo reorganize | 12 ms | 8,667 ms (8.7 s) | 8,714 ms (8.7 s) |
+| Trash 10% + undo | 9 ms | 2,328 ms (2.3 s) | 2,351 ms (2.4 s) |
 | Store size | 2,048.0 MB | 2,048.7 MB | 2,048.3 MB |
 
 Small: 5,000 files × 4 KB
 
 | Step | wasnew | git | git (no compression) |
 |---|---:|---:|---:|
-| First snapshot | 2,336 | 7,034 | 7,880 |
-| Re-snapshot, nothing changed | 151 | 57 | 53 |
-| Reorganize | 2,646 | 3,699 | 3,797 |
-| Undo reorganize | 2,572 | 2,566 | 2,647 |
-| Trash 10% + undo | 555 | 659 | 630 |
+| First snapshot | 2,336 ms (2.3 s) | 7,034 ms (7.0 s) | 7,880 ms (7.9 s) |
+| Re-snapshot, nothing changed | 151 ms | 57 ms | 53 ms |
+| Reorganize | 2,646 ms (2.6 s) | 3,699 ms (3.7 s) | 3,797 ms (3.8 s) |
+| Undo reorganize | 2,572 ms (2.6 s) | 2,566 ms (2.6 s) | 2,647 ms (2.6 s) |
+| Trash 10% + undo | 555 ms | 659 ms | 630 ms |
 | Store size | 21.9 MB | 20.3 MB | 20.5 MB |
 
 With large files wasnew wins because its moves and undos are renames, while git rewrites the working tree and rehashes content. It loses the unchanged re-snapshot on small files because it stats each file from Node, while git relies on its cached directory scan on Windows. Undo on small files is about even (2,572 vs 2,566 ms).
