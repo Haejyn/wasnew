@@ -2,7 +2,8 @@
 // file into sorted/<ext>/, undo that, trash 10% and undo, then store size. git runs twice: default
 // config, and with compression off (fair, since the data is incompressible like photos and video).
 // Each tool works on its own fresh copy. Run `pnpm build` first.
-//   node scripts/bench-git.mjs [--shape small|media|all] [--runs N] [--dir path]
+// --json also writes the medians, store sizes and environment to a file; the tables print as before.
+//   node scripts/bench-git.mjs [--shape small|media|all] [--runs N] [--dir path] [--json file]
 import { openVault } from "../dist/index.js";
 import { promises as fs } from "node:fs";
 import { randomFillSync } from "node:crypto";
@@ -13,7 +14,7 @@ import path from "node:path";
 import os from "node:os";
 
 const run = promisify(execFile);
-const { values: args } = parseArgs({ options: { shape: { type: "string", default: "all" }, runs: { type: "string", default: "3" }, dir: { type: "string" } } });
+const { values: args } = parseArgs({ options: { shape: { type: "string", default: "all" }, runs: { type: "string", default: "3" }, dir: { type: "string" }, json: { type: "string" } } });
 const RUNS = Math.max(1, Number(args.runs) || 3);
 const SHAPES = {
   small: { files: 5000, size: 4 * 1024, folders: 50, exts: ["jpg", "png", "txt", "pdf", "mp4"] },
@@ -134,6 +135,7 @@ const base = args.dir ? path.resolve(args.dir) : os.tmpdir();
 await fs.mkdir(base, { recursive: true });
 const tmp = await fs.mkdtemp(path.join(base, "wasnew-bench-git-"));
 const { stdout: gitVersion } = await run("git", ["--version"]);
+const report = { date: new Date().toISOString(), runs: RUNS, shapes: {} };
 try {
   for (const name of shapes) {
     const shape = SHAPES[name];
@@ -164,6 +166,13 @@ try {
     console.log(`\n### ${name}: ${shape.files.toLocaleString("en")} files × ${human}, median of ${RUNS} run(s), ms unless noted\n`);
     console.log(`| step | ${Object.keys(TOOLS).join(" | ")} |`);
     console.log(`|---|${Object.keys(TOOLS).map(() => "---:").join("|")}|`);
+    const perTool = (s) => Object.fromEntries(Object.keys(TOOLS).map((k) => [k, median(results[k][s])]));
+    report.shapes[name] = {
+      files: shape.files,
+      fileBytes: shape.size,
+      medianMs: Object.fromEntries(STEPS.filter((s) => !s.includes("MB")).map((s) => [s, perTool(s)])),
+      storeMB: perTool(STEPS[5]),
+    };
     const fmt = (s, x) => (s.includes("MB") ? x.toFixed(1) : Math.round(x).toLocaleString("en"));
     for (const s of STEPS) {
       const cells = Object.keys(TOOLS).map((k) => fmt(s, median(results[k][s])));
@@ -181,7 +190,9 @@ try {
       console.log(`| ${s} | ${cells.join(" | ")} |`);
     }
   }
-  console.log("\n" + JSON.stringify({ platform: os.platform(), release: os.release(), cpu: os.cpus()[0]?.model, cores: os.cpus().length, node: process.version, git: gitVersion.trim(), shapes, runs: RUNS }));
+  const env = { platform: os.platform(), release: os.release(), cpu: os.cpus()[0]?.model, cores: os.cpus().length, node: process.version, git: gitVersion.trim() };
+  console.log("\n" + JSON.stringify({ ...env, shapes, runs: RUNS }));
+  if (args.json) await fs.writeFile(path.resolve(args.json), JSON.stringify({ ...report, env }, null, 2) + "\n");
 } finally {
   await fs.rm(tmp, { recursive: true, force: true });
 }
