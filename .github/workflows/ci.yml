@@ -24,3 +24,36 @@ jobs:
       - run: pnpm test
       - run: pnpm build
       - run: node bin/wasnew.js --version
+  facts:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm build
+      - run: node scripts/facts.mjs --out facts.json
+      - run: cat facts.json
+      - name: Upload to the facts-latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view facts-latest || gh release create facts-latest --prerelease --title facts-latest --notes "CI 가 만든 숫자. 손으로 고치지 않는다"
+          gh release upload facts-latest facts.json --clobber
+      - name: Tell the portfolio repo
+        env:
+          GH_TOKEN: ${{ secrets.PORTFOLIO_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "PORTFOLIO_DISPATCH_TOKEN is not set, skipping the portfolio dispatch"
+            exit 0
+          fi
+          gh api repos/Haejyn/Haejyn.github.io/dispatches -f event_type=facts-updated -f "client_payload[project]=wasnew"
